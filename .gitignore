@@ -1,0 +1,24 @@
+# Visual Studio
+.vs/
+
+# CMake build output
+out/
+build/
+
+# User-specific files
+*.user
+*.suo
+
+# Compiled files
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
