@@ -6,7 +6,13 @@ EvoBrainBot is an artificial-life simulation where autonomous agents evolve beha
 
 Early development.
 
-The project is currently focused on establishing a clean and flexible foundation for the simulation.
+The project currently provides a small deterministic headless simulation in
+which agents sense food, move, spend energy, eat, die, reproduce, and inherit
+mutated brain parameters.
+
+The current mechanics and configuration values are provisional. They establish
+a complete testable evolutionary loop and are expected to be refined after
+viewer and experiment tooling is available.
 
 ## Goals
 
@@ -57,7 +63,7 @@ ctest --test-dir build --build-config Release --output-on-failure
 
 ## Run headless
 
-The headless runner requires an explicit seed and tick count:
+Start a new simulation with an explicit seed and tick count:
 
 ```sh
 ./build/EvoBrainBot run --seed 1234 --ticks 1000
@@ -70,11 +76,54 @@ selected configuration directory:
 .\build\Release\EvoBrainBot.exe run --seed 1234 --ticks 1000
 ```
 
+The final summary reports the completed tick count, living population, food,
+reproduction births, random agent introductions, and deaths.
+
+### Save and resume
+
+Every successful `run` and `resume` command saves the complete final simulation
+state. If `--checkpoint-out` is omitted, the state is written to
+`autosave.evo` in the current directory, replacing an existing file with that
+name.
+
+Choose a different checkpoint path with `--checkpoint-out`:
+
+```sh
+./build/EvoBrainBot run --seed 1234 --ticks 1000 \
+    --checkpoint-out state.evo
+```
+
+Resume the checkpoint for an additional number of ticks. The continued state is
+also saved to `autosave.evo` unless another output path is supplied:
+
+```sh
+./build/EvoBrainBot resume --checkpoint-in state.evo --ticks 500 \
+    --checkpoint-out continued.evo
+```
+
+On Windows with a Visual Studio generator:
+
+```powershell
+.\build\Release\EvoBrainBot.exe run --seed 1234 --ticks 1000 `
+    --checkpoint-out state.evo
+
+.\build\Release\EvoBrainBot.exe resume --checkpoint-in state.evo --ticks 500 `
+    --checkpoint-out continued.evo
+```
+
+`--ticks` always means the ticks executed by the current command. A resumed run
+obtains its original seed, configuration, accumulated statistics, entities, and
+random-generator state from the checkpoint.
+
+Checkpoints use a versioned binary format. Unsupported, incomplete, and invalid
+checkpoint files are rejected instead of being partially loaded.
+
 Display the available commands or help for `run` with:
 
 ```sh
 ./build/EvoBrainBot --help
 ./build/EvoBrainBot run --help
+./build/EvoBrainBot resume --help
 ```
 
 On Windows with a Visual Studio generator:
@@ -82,6 +131,7 @@ On Windows with a Visual Studio generator:
 ```powershell
 .\build\Release\EvoBrainBot.exe --help
 .\build\Release\EvoBrainBot.exe run --help
+.\build\Release\EvoBrainBot.exe resume --help
 ```
 
 ## License

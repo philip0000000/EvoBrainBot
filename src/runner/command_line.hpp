@@ -7,6 +7,7 @@
 namespace evobrain::runner {
 
 inline constexpr int success_exit_code = 0;
+inline constexpr int runtime_error_exit_code = 1;
 inline constexpr int usage_error_exit_code = 2;
 
 // Parses and executes a command using the supplied output streams.

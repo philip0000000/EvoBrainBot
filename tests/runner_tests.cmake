@@ -6,6 +6,7 @@ endif()
 function(expect_command name expected_result expected_stdout expected_stderr)
     execute_process(
         COMMAND "${EVOBRAINBOT_EXECUTABLE}" ${ARGN}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
         RESULT_VARIABLE actual_result
         OUTPUT_VARIABLE actual_stdout
         ERROR_VARIABLE actual_stderr
@@ -31,21 +32,113 @@ function(expect_command name expected_result expected_stdout expected_stderr)
     endif()
 endfunction()
 
-set(top_level_help
-    "Usage:\n  EvoBrainBot --help\n  EvoBrainBot run --help\n  EvoBrainBot run --seed <seed> --ticks <ticks>\n")
-set(run_help
-    "Usage: EvoBrainBot run --seed <seed> --ticks <ticks>\n\nBoth values are required decimal unsigned 64-bit integers.\n")
+string(CONCAT top_level_help
+    "Usage:\n"
+    "  EvoBrainBot --help\n"
+    "  EvoBrainBot run --help\n"
+    "  EvoBrainBot run --seed <seed> --ticks <ticks> [--checkpoint-out <path>]\n"
+    "  EvoBrainBot resume --help\n"
+    "  EvoBrainBot resume --checkpoint-in <path> --ticks <ticks> [--checkpoint-out <path>]\n")
+string(CONCAT run_help
+    "Usage: EvoBrainBot run --seed <seed> --ticks <ticks> [--checkpoint-out <path>]\n"
+    "\nSeed and ticks are required decimal unsigned 64-bit integers.\n"
+    "If checkpoint-out is omitted, the final state is saved to autosave.evo.\n")
+string(CONCAT resume_help
+    "Usage: EvoBrainBot resume --checkpoint-in <path> --ticks <ticks> [--checkpoint-out <path>]\n"
+    "\nThe checkpoint and an additional decimal unsigned 64-bit tick count are required.\n"
+    "If checkpoint-out is omitted, the final state is saved to autosave.evo.\n")
+string(CONCAT zero_tick_summary
+    "Seed: 1234\n"
+    "Completed ticks: 0\n"
+    "Population: 30\n"
+    "Food: 100\n"
+    "Births: 0\n"
+    "Introduced agents: 0\n"
+    "Deaths: 0\n")
+string(CONCAT one_tick_summary
+    "Seed: 1234\n"
+    "Completed ticks: 1\n"
+    "Population: 30\n"
+    "Food: 100\n"
+    "Births: 0\n"
+    "Introduced agents: 0\n"
+    "Deaths: 0\n")
+string(CONCAT two_tick_summary
+    "Seed: 1234\n"
+    "Completed ticks: 2\n"
+    "Population: 30\n"
+    "Food: 100\n"
+    "Births: 0\n"
+    "Introduced agents: 0\n"
+    "Deaths: 0\n")
+
+set(default_checkpoint_path
+    "${CMAKE_CURRENT_BINARY_DIR}/autosave.evo")
+file(REMOVE "${default_checkpoint_path}")
 
 expect_command(top_level_help 0 "${top_level_help}" "" --help)
 expect_command(run_help 0 "${run_help}" "" run --help)
-expect_command(valid_run 0 "Seed: 1234\nCompleted ticks: 10\n" ""
-    run --seed 1234 --ticks 10)
-expect_command(reversed_options 0 "Seed: 7\nCompleted ticks: 3\n" ""
-    run --ticks 3 --seed 7)
-expect_command(zero_values 0 "Seed: 0\nCompleted ticks: 0\n" ""
-    run --seed 0 --ticks 0)
-expect_command(maximum_seed 0 "Seed: 18446744073709551615\nCompleted ticks: 0\n" ""
+expect_command(resume_help 0 "${resume_help}" "" resume --help)
+expect_command(valid_run 0 "${one_tick_summary}" ""
+    run --seed 1234 --ticks 1)
+if(NOT EXISTS "${default_checkpoint_path}")
+    message(FATAL_ERROR "valid_run: default checkpoint was not created")
+endif()
+expect_command(resume_default_checkpoint 0 "${two_tick_summary}" ""
+    resume --checkpoint-in "${default_checkpoint_path}" --ticks 1)
+expect_command(read_resaved_default_checkpoint 0 "${two_tick_summary}" ""
+    resume --checkpoint-in "${default_checkpoint_path}" --ticks 0)
+expect_command(reversed_options 0 "${zero_tick_summary}" ""
+    run --ticks 0 --seed 1234)
+
+string(CONCAT maximum_seed_summary
+    "Seed: 18446744073709551615\n"
+    "Completed ticks: 0\n"
+    "Population: 30\n"
+    "Food: 100\n"
+    "Births: 0\n"
+    "Introduced agents: 0\n"
+    "Deaths: 0\n")
+expect_command(maximum_seed 0 "${maximum_seed_summary}" ""
     run --seed 18446744073709551615 --ticks 0)
+
+set(checkpoint_path "${CMAKE_CURRENT_BINARY_DIR}/runner-test-checkpoint.evo")
+set(resumed_checkpoint_path
+    "${CMAKE_CURRENT_BINARY_DIR}/runner-test-resumed-checkpoint.evo")
+set(missing_checkpoint_path
+    "${CMAKE_CURRENT_BINARY_DIR}/runner-test-missing-checkpoint.evo")
+set(invalid_checkpoint_path
+    "${CMAKE_CURRENT_BINARY_DIR}/runner-test-invalid-checkpoint.evo")
+file(REMOVE
+    "${default_checkpoint_path}"
+    "${checkpoint_path}"
+    "${resumed_checkpoint_path}"
+    "${missing_checkpoint_path}"
+    "${invalid_checkpoint_path}")
+
+expect_command(save_checkpoint 0 "${zero_tick_summary}" ""
+    run --seed 1234 --ticks 0 --checkpoint-out "${checkpoint_path}")
+if(NOT EXISTS "${checkpoint_path}")
+    message(FATAL_ERROR "save_checkpoint: checkpoint file was not created")
+endif()
+
+expect_command(resume_checkpoint 0 "${one_tick_summary}" ""
+    resume --checkpoint-in "${checkpoint_path}" --ticks 1
+    --checkpoint-out "${resumed_checkpoint_path}")
+if(NOT EXISTS "${resumed_checkpoint_path}")
+    message(FATAL_ERROR "resume_checkpoint: output checkpoint was not created")
+endif()
+
+file(WRITE "${invalid_checkpoint_path}" "not a checkpoint")
+expect_command(invalid_checkpoint 1 ""
+    "Error: invalid EvoBrainBot checkpoint identifier\n"
+    resume --checkpoint-in "${invalid_checkpoint_path}" --ticks 0)
+expect_command(missing_checkpoint 1 ""
+    "Error: unable to open checkpoint input\n"
+    resume --checkpoint-in "${missing_checkpoint_path}" --ticks 0)
+expect_command(invalid_checkpoint_output 1 ""
+    "Error: unable to open checkpoint output\n"
+    run --seed 1 --ticks 0 --checkpoint-out "${checkpoint_path}/child.evo")
 
 expect_command(missing_command 2 "" "Error: missing command\n")
 expect_command(unknown_command 2 "" "Error: unknown command\n" unknown)
@@ -61,6 +154,8 @@ expect_command(duplicate_seed 2 "" "Error: duplicate option\n"
     run --seed 1 --seed 2 --ticks 3)
 expect_command(duplicate_ticks 2 "" "Error: duplicate option\n"
     run --ticks 1 --ticks 2 --seed 3)
+expect_command(duplicate_output 2 "" "Error: duplicate option\n"
+    run --seed 1 --ticks 0 --checkpoint-out one --checkpoint-out two)
 expect_command(negative_seed 2 "" "Error: invalid unsigned integer value\n"
     run --seed -1 --ticks 1)
 expect_command(negative_ticks 2 "" "Error: invalid unsigned integer value\n"
@@ -77,3 +172,19 @@ expect_command(unknown_option 2 "" "Error: unknown option\n"
     run --seed 1 --ticks 1 --extra 2)
 expect_command(unexpected_position 2 "" "Error: unexpected positional argument\n"
     run --seed 1 --ticks 1 extra)
+
+expect_command(resume_missing_input 2 ""
+    "Error: missing required option '--checkpoint-in'\n"
+    resume --ticks 1)
+expect_command(resume_missing_ticks 2 ""
+    "Error: missing required option '--ticks'\n"
+    resume --checkpoint-in "${checkpoint_path}")
+expect_command(resume_rejects_seed 2 "" "Error: unknown option\n"
+    resume --checkpoint-in "${checkpoint_path}" --ticks 1 --seed 2)
+expect_command(run_rejects_input 2 "" "Error: unknown option\n"
+    run --seed 1 --ticks 1 --checkpoint-in "${checkpoint_path}")
+
+file(REMOVE
+    "${checkpoint_path}"
+    "${resumed_checkpoint_path}"
+    "${invalid_checkpoint_path}")
