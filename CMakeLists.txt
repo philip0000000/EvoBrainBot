@@ -5,6 +5,8 @@ project(EvoBrainBot LANGUAGES CXX)
 include(CTest)
 
 add_library(evobrain_core STATIC
+    "src/core/brain.cpp"
+    "src/core/checkpoint.cpp"
     "src/core/random.cpp"
     "src/core/simulation.cpp"
 )
@@ -20,6 +22,10 @@ set_target_properties(evobrain_core PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
+if(MSVC)
+    target_compile_options(evobrain_core PRIVATE /EHsc)
+endif()
+
 add_executable(EvoBrainBot
     "src/runner/command_line.cpp"
     "src/runner/main.cpp"
@@ -33,8 +39,13 @@ set_target_properties(EvoBrainBot PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
+if(MSVC)
+    target_compile_options(EvoBrainBot PRIVATE /EHsc)
+endif()
+
 if(BUILD_TESTING)
     add_executable(evobrain_tests
+        "tests/checkpoint_tests.cpp"
         "tests/simulation_tests.cpp"
     )
 
@@ -45,6 +56,10 @@ if(BUILD_TESTING)
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
     )
+
+    if(MSVC)
+        target_compile_options(evobrain_tests PRIVATE /EHsc)
+    endif()
 
     add_test(NAME evobrain_core_tests COMMAND evobrain_tests)
     add_test(
