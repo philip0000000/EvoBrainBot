@@ -127,7 +127,22 @@ if(EVOBRAIN_BUILD_VIEWER)
         target_compile_options(evobrain_viewer_support PRIVATE /EHsc)
     endif()
 
-    find_program(EVOBRAIN_DXC_EXECUTABLE NAMES dxc.exe dxc REQUIRED)
+    # A Visual Studio developer shell places DXC on PATH, while ordinary
+    # Windows terminals and hosted CI runners may expose it only through the
+    # versioned Windows SDK directories.
+    file(GLOB EVOBRAIN_WINDOWS_SDK_DXC_DIRECTORIES
+        LIST_DIRECTORIES TRUE
+        "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/*/x64"
+    )
+    list(SORT EVOBRAIN_WINDOWS_SDK_DXC_DIRECTORIES
+        COMPARE NATURAL
+        ORDER DESCENDING
+    )
+    find_program(EVOBRAIN_DXC_EXECUTABLE
+        NAMES dxc.exe dxc
+        HINTS ${EVOBRAIN_WINDOWS_SDK_DXC_DIRECTORIES}
+        REQUIRED
+    )
     set(EVOBRAIN_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/compiled-shaders")
     set(EVOBRAIN_WORLD_VERTEX_SHADER
         "${EVOBRAIN_SHADER_OUTPUT_DIR}/world.vert.dxil")
