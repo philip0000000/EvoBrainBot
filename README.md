@@ -6,9 +6,9 @@ EvoBrainBot is an artificial-life simulation where autonomous agents evolve beha
 
 Early development.
 
-The project currently provides a small deterministic headless simulation in
-which agents sense food, move, spend energy, eat, die, reproduce, and inherit
-mutated brain parameters.
+The project currently provides a deterministic headless simulation and a basic
+Windows viewer. Agents sense food, move, spend energy, eat, die, reproduce, and
+inherit mutated brain parameters.
 
 The current mechanics and configuration values are provisional. They establish
 a complete testable evolutionary loop and are expected to be refined after
@@ -26,6 +26,8 @@ viewer and experiment tooling is available.
 
 * C++20
 * CMake
+* SDL 3 with SDL_GPU (Direct3D 12) for the Windows viewer
+* Dear ImGui for the viewer interface
 
 ## Build
 
@@ -38,12 +40,17 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-On Windows from a Visual Studio developer shell:
+On Windows from a Visual Studio x64 developer shell, the repository presets
+build the viewer and headless executable together:
 
 ```powershell
-cmake -S . -B build
-cmake --build build --config Release
+cmake --preset x64-release
+cmake --build out/build/x64-release
 ```
+
+The x86 presets continue to build only the existing headless executable. SDL 3
+and Dear ImGui are fetched at pinned revisions during an x64 viewer configure;
+no machine-wide copies are required.
 
 ## Test
 
@@ -55,11 +62,74 @@ On Linux:
 ctest --test-dir build --output-on-failure
 ```
 
-On Windows with a multi-configuration generator:
+On Windows with a repository preset:
 
 ```powershell
-ctest --test-dir build --build-config Release --output-on-failure
+ctest --test-dir out/build/x64-release --output-on-failure
 ```
+
+## Run the Windows viewer
+
+`EvoBrainBotViewer` targets Windows 11 x64 and a Direct3D 12-capable GPU. There
+is no software-rendering fallback. Windows 10 and other operating systems are
+not acceptance targets for this first viewer, while the headless simulation
+retains its existing platform and x86 build options.
+
+Run the viewer from its build directory:
+
+```powershell
+.\out\build\x64-release\EvoBrainBotViewer.exe
+```
+
+The viewer starts empty and opens existing `.evo` checkpoints; it does not
+create a new simulation. Checkpoints open paused, and a failed open or save
+leaves the current simulation intact.
+
+Controls:
+
+* `Ctrl+O`: open a checkpoint
+* `Ctrl+S`: save the paused checkpoint, opening Save As on its first save
+* `Space`: run or pause
+* `.`: advance one tick while paused
+* `F`: enter or leave Fast-forward
+* Mouse wheel: zoom around the pointer
+* Middle-mouse drag: pan
+* `Home`: reset the camera
+
+Fast-forward advances without drawing the world and refreshes the interface
+statistics periodically. The Target TPS input controls normal playback from 1
+through 1000 ticks per second. Save As is available from the File menu and has
+no keyboard shortcut.
+
+### Portable viewer directory
+
+Create the self-contained viewer directory after an x64 Release build:
+
+```powershell
+cmake --install out/build/x64-release
+```
+
+The preset installs to `out/install/x64-release`. The directory contains the
+viewer executable, compiled DXIL shaders, this README, and the required project
+and dependency license notices. It is a portable directory, not an installer;
+the first version does not register `.evo` file associations. The target
+Windows 11 development system already provides the Microsoft Visual C++ runtime.
+
+### Render-only performance check
+
+The developer benchmark measures the production renderer without advancing the
+simulation. It renders the full world and headings at 2560 x 1440, first with
+50,000 agents plus 50,000 food and then with an informational 100,000 plus
+100,000 workload:
+
+```powershell
+.\out\build\x64-release\evobrain_viewer_render_benchmark.exe
+```
+
+The required 50,000 plus 50,000 case exits unsuccessfully below 75 render-only
+frames per second. Simulation throughput must be measured separately with the
+headless executable because simulation speed is not a renderer acceptance
+measurement. See `docs/viewer-performance.md` for the recorded acceptance run.
 
 ## Run headless
 
@@ -136,4 +206,4 @@ On Windows with a Visual Studio generator:
 
 ## License
 
-Licensed under the Apache License 2.0.
+Licensed under the MIT License. See `LICENSE`.
