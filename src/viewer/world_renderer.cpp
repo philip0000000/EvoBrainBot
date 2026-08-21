@@ -34,6 +34,9 @@ constexpr Color world_boundary {0.16F, 0.18F, 0.22F, 1.0F};
 constexpr Color agent_color {0.08F, 0.40F, 0.75F, 1.0F};
 constexpr Color heading_color {0.04F, 0.22F, 0.48F, 1.0F};
 constexpr Color food_color {0.10F, 0.55F, 0.22F, 1.0F};
+constexpr Color selection_glow {1.0F, 0.68F, 0.08F, 0.68F};
+constexpr Color energy_background {0.08F, 0.10F, 0.12F, 0.92F};
+constexpr Color energy_fill {0.16F, 0.72F, 0.28F, 1.0F};
 
 // Reads one build-generated shader blob without runtime compilation.
 std::vector<std::uint8_t> read_binary_file(
@@ -258,6 +261,7 @@ bool WorldRenderer::prepare(
     const PixelViewport& viewport,
     const Camera& camera,
     const RenderSnapshot* snapshot,
+    const WorldRenderOptions& options,
     std::string& error)
 {
     if (viewport.width <= 0 || viewport.height <= 0) {
@@ -273,9 +277,10 @@ bool WorldRenderer::prepare(
     const double pixels_per_world = std::min(viewport.width, viewport.height) * camera.zoom();
 
     std::vector<ShapeInstance> instances;
+    const std::size_t shapes_per_agent = options.show_agent_information ? 4 : 2;
     const std::size_t entity_count = snapshot == nullptr
         ? 0
-        : snapshot->food.size() + snapshot->agents.size() * 2;
+        : snapshot->food.size() + snapshot->agents.size() * shapes_per_agent;
     instances.reserve(entity_count + 16);
 
     const auto add_screen_shape = [&](const float center_x,
@@ -383,8 +388,7 @@ bool WorldRenderer::prepare(
     if (snapshot != nullptr) {
         const float food_radius = static_cast<float>(
             std::clamp(2.0 * camera.zoom(), 1.0, 10.0));
-        const float agent_radius = static_cast<float>(
-            std::clamp(4.0 * camera.zoom(), 2.0, 20.0));
+        const float agent_radius = static_cast<float>(agent_visual_radius(camera.zoom()));
         const double wrap_margin = (agent_radius * 2.5) / pixels_per_world;
 
         const auto offsets_for = [&](const double coordinate) {
@@ -410,6 +414,27 @@ bool WorldRenderer::prepare(
                     add_screen_shape(static_cast<float>(screen.x), static_cast<float>(screen.y),
                         food_radius, food_radius, 0.0F, food_color, circle_shape);
                 }
+            }
+        }
+
+        if (options.selected_agent_id) {
+            for (const AgentVisual& agent : snapshot->agents) {
+                if (agent.id != *options.selected_agent_id) {
+                    continue;
+                }
+                const AgentScreenCopies copies =
+                    agent_screen_copies(agent, camera, camera_viewport);
+                for (std::size_t index = 0; index < copies.count; ++index) {
+                    add_screen_shape(
+                        static_cast<float>(copies.centers[index].x),
+                        static_cast<float>(copies.centers[index].y),
+                        agent_radius + 4.0F,
+                        agent_radius + 4.0F,
+                        0.0F,
+                        selection_glow,
+                        circle_shape);
+                }
+                break;
             }
         }
 
@@ -441,8 +466,37 @@ bool WorldRenderer::prepare(
                     const Vec2 screen = camera.world_to_screen(
                         {.x = agent.x + x_offsets[x], .y = agent.y + y_offsets[y]},
                         camera_viewport);
-                    add_screen_shape(static_cast<float>(screen.x), static_cast<float>(screen.y),
-                        agent_radius, agent_radius, 0.0F, agent_color, circle_shape);
+                    add_screen_shape(static_cast<float>(screen.x),
+                        static_cast<float>(screen.y), agent_radius, agent_radius,
+                        0.0F, agent_color, circle_shape);
+                }
+            }
+        }
+        if (options.show_agent_information) {
+            const float bar_half_width = std::clamp(agent_radius * 1.8F, 6.0F, 32.0F);
+            const float bar_half_height = std::clamp(agent_radius * 0.18F, 1.0F, 3.0F);
+            for (const AgentVisual& agent : snapshot->agents) {
+                const float fraction = static_cast<float>(std::clamp(
+                    static_cast<double>(agent.energy) / snapshot->reproduction_threshold,
+                    0.0,
+                    1.0));
+                const AgentScreenCopies copies =
+                    agent_screen_copies(agent, camera, camera_viewport);
+                for (std::size_t index = 0; index < copies.count; ++index) {
+                    const float center_x = static_cast<float>(copies.centers[index].x);
+                    const float center_y = static_cast<float>(copies.centers[index].y)
+                        - agent_radius - bar_half_height - 2.0F;
+                    add_screen_shape(center_x, center_y, bar_half_width,
+                        bar_half_height, 0.0F, energy_background, rectangle_shape);
+                    if (fraction > 0.0F) {
+                        const float filled_half_width = bar_half_width * fraction;
+                        // Anchor the fill at the left edge rather than shrinking
+                        // toward the center as the agent spends energy.
+                        const float filled_center_x = center_x - bar_half_width
+                            + filled_half_width;
+                        add_screen_shape(filled_center_x, center_y, filled_half_width,
+                            bar_half_height, 0.0F, energy_fill, rectangle_shape);
+                    }
                 }
             }
         }

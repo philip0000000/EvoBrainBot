@@ -1,10 +1,12 @@
 #include "evobrain/checkpoint.hpp"
 #include "evobrain/simulation.hpp"
+#include "evobrain/viewer/agent_selection.hpp"
 #include "evobrain/viewer/camera.hpp"
 #include "evobrain/viewer/simulation_worker.hpp"
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -137,11 +139,141 @@ void test_complete_render_snapshot()
         "render snapshot contains every agent");
     expect(rendered->food.size() == simulation.food().size(),
         "render snapshot contains every food item");
+    expect(rendered->reproduction_threshold
+            == simulation.config().reproduction_threshold,
+        "render snapshot contains the energy-bar reference threshold");
+    expect(rendered->agents.front().id == simulation.agents().front().id
+            && rendered->agents.front().energy
+                == static_cast<float>(simulation.agents().front().energy),
+        "agent visual contains stable identity and current energy");
     expect(rendered->agents.front().x
             == static_cast<float>(simulation.agents().front().position.x)
         && rendered->agents.front().y
             == static_cast<float>(simulation.agents().front().position.y),
         "agent visual coordinates match the same simulation state");
+}
+
+// Verifies full inspection state is published only for the selected stable ID.
+void test_selected_agent_details()
+{
+    evobrain::Simulation simulation(evobrain::SimulationConfig {.seed = 912});
+    const evobrain::Agent selected = simulation.agents().front();
+    evobrain::viewer::SimulationWorker worker;
+    expect(worker.load_snapshot(simulation.snapshot()).succeeded,
+        "selection detail test loads its simulation");
+    worker.select_agent(selected.id);
+
+    const auto rendered = worker.latest_render_snapshot();
+    expect(rendered && rendered->selected_agent.has_value(),
+        "selecting a current stable ID publishes full details");
+    if (rendered && rendered->selected_agent) {
+        const auto& details = *rendered->selected_agent;
+        expect(details.id == selected.id && details.position == selected.position
+                && details.direction == selected.direction
+                && details.energy == selected.energy && details.age == selected.age
+                && details.generation == selected.generation,
+            "selected details match one complete agent state");
+        expect(details.brain == selected.brain,
+            "selected details contain the exact evolved brain parameters");
+    }
+    expect(worker.status().selected_agent_id == selected.id,
+        "worker status publishes the selected stable ID");
+
+    expect(worker.step().succeeded, "selected detail test advances one tick");
+    const auto advanced_state = worker.copy_simulation_snapshot();
+    const auto advanced_render = worker.latest_render_snapshot();
+    bool details_follow_agent = false;
+    if (advanced_state && advanced_render && advanced_render->selected_agent) {
+        const auto advanced_agent = std::ranges::find(
+            advanced_state->agents, selected.id, &evobrain::Agent::id);
+        details_follow_agent = advanced_agent != advanced_state->agents.end()
+            && advanced_render->selected_agent->position == advanced_agent->position
+            && advanced_render->selected_agent->energy == advanced_agent->energy;
+    }
+    expect(details_follow_agent,
+        "selected details follow the same stable ID after a completed tick");
+
+    expect(worker.load_snapshot(simulation.snapshot()).succeeded,
+        "selection detail test can replace the current simulation");
+    expect(!worker.status().selected_agent_id
+            && !worker.latest_render_snapshot()->selected_agent,
+        "loading a replacement simulation clears viewer selection");
+
+    worker.select_agent(std::uint64_t {999'999});
+    const auto missing = worker.latest_render_snapshot();
+    expect(missing && !missing->selected_agent,
+        "a missing stable ID publishes no selected-agent details");
+    expect(!worker.status().selected_agent_id,
+        "a missing stable ID clears viewer selection");
+}
+
+// Verifies a completed tick clears selection when an agent dies and IDs advance.
+void test_selected_agent_death()
+{
+    evobrain::SimulationConfig config {.seed = 43};
+    config.initial_population = 1;
+    config.minimum_population = 1;
+    config.target_food_count = 0;
+    config.initial_energy = 0.01;
+    config.living_energy_cost = 1.0;
+    config.movement_energy_cost = 0.0;
+    evobrain::Simulation simulation(config);
+    const std::uint64_t doomed_id = simulation.agents().front().id;
+    evobrain::viewer::SimulationWorker worker;
+    expect(worker.load_snapshot(simulation.snapshot()).succeeded,
+        "selected death test loads its simulation");
+    worker.select_agent(doomed_id);
+    expect(worker.step().succeeded, "selected death test advances one tick");
+    const auto rendered = worker.latest_render_snapshot();
+    expect(rendered && !rendered->selected_agent,
+        "completed state omits details for the dead selected agent");
+    expect(!worker.status().selected_agent_id,
+        "dead selected agent clears viewer selection despite replacement founders");
+}
+
+// Verifies screen-space selection matches bodies, wrapped copies, and stable IDs.
+void test_agent_hit_testing()
+{
+    const evobrain::viewer::CameraViewport viewport {
+        .width = 1000.0, .height = 1000.0};
+    evobrain::viewer::Camera camera;
+    camera.reset(viewport);
+    evobrain::viewer::RenderSnapshot snapshot;
+    snapshot.agents = {
+        {.id = 9, .x = 0.5F, .y = 0.5F},
+        {.id = 3, .x = 0.5F, .y = 0.5F},
+    };
+    expect(evobrain::viewer::select_agent_at_screen(
+               snapshot, camera, viewport, 500.0, 500.0)
+            == std::uint64_t {3},
+        "overlapping equal-distance agents select the lowest stable ID");
+    expect(!evobrain::viewer::select_agent_at_screen(
+                snapshot, camera, viewport, 100.0, 100.0),
+        "clicking outside every rendered body selects no agent");
+
+    snapshot.agents = {{.id = 77, .x = 0.001F, .y = 0.5F}};
+    expect(evobrain::viewer::select_agent_at_screen(
+               snapshot, camera, viewport, 999.0, 500.0)
+            == std::uint64_t {77},
+        "a visible wrapped body selects its underlying stable agent ID");
+    expect(!evobrain::viewer::select_agent_at_screen(
+                snapshot, camera, viewport, 1004.0, 500.0),
+        "a wrapped body is not clickable through the clipped world exterior");
+    snapshot.contains_world = false;
+    expect(!evobrain::viewer::select_agent_at_screen(
+                snapshot, camera, viewport, 999.0, 500.0),
+        "statistics-only snapshots cannot select invisible agents");
+}
+
+// Verifies the overlay shortcut is suppressed only during text entry.
+void test_agent_information_shortcut()
+{
+    expect(evobrain::viewer::agent_information_shortcut_pressed(true, false),
+        "I toggles agent information outside text input");
+    expect(!evobrain::viewer::agent_information_shortcut_pressed(true, true),
+        "I is ignored while a text input owns keyboard entry");
+    expect(!evobrain::viewer::agent_information_shortcut_pressed(false, false),
+        "agent information remains unchanged without an I press");
 }
 
 // Verifies a failed replacement load leaves the prior simulation untouched.
@@ -240,11 +372,16 @@ void test_fast_forward_snapshot_policy()
     evobrain::viewer::SimulationWorker worker;
     expect(worker.load_snapshot(simulation.snapshot()).succeeded,
         "fast-forward test loads its simulation");
+    const std::uint64_t selected_id = simulation.agents().front().id;
+    worker.select_agent(selected_id);
     expect(worker.fast_forward().succeeded, "Fast-forward starts");
     expect(wait_for_tick(worker, 5), "Fast-forward publishes progress statistics");
     const auto fast_snapshot = worker.latest_render_snapshot();
     expect(fast_snapshot && !fast_snapshot->contains_world,
         "Fast-forward statistics omit world entity vectors");
+    expect(fast_snapshot && !fast_snapshot->selected_agent
+            && worker.status().selected_agent_id == selected_id,
+        "Fast-forward omits details while retaining the selected stable ID");
 
     const auto pause_started = std::chrono::steady_clock::now();
     expect(worker.pause().succeeded, "Fast-forward pauses successfully");
@@ -258,6 +395,17 @@ void test_fast_forward_snapshot_policy()
             && paused_snapshot->agents.size() == paused_snapshot->stats.population
             && paused_snapshot->food.size() == paused_snapshot->stats.food,
         "paused world snapshot contains every current entity");
+    const bool selected_survived = paused_snapshot
+        && std::ranges::any_of(paused_snapshot->agents,
+            [selected_id](const evobrain::viewer::AgentVisual& agent) {
+                return agent.id == selected_id;
+            });
+    expect(selected_survived
+            ? paused_snapshot->selected_agent
+                && paused_snapshot->selected_agent->id == selected_id
+            : !paused_snapshot->selected_agent
+                && !worker.status().selected_agent_id,
+        "Pause restores a surviving selection or clears a dead selection");
 }
 
 // Verifies reset transforms the unit world consistently for a wide viewport.
@@ -338,6 +486,10 @@ int main()
     test_worker_determinism_and_step();
     test_tick_boundary_pause();
     test_complete_render_snapshot();
+    test_selected_agent_details();
+    test_selected_agent_death();
+    test_agent_hit_testing();
+    test_agent_information_shortcut();
     test_failed_load_preserves_state(directory);
     test_save_reload_and_unsaved_state(directory);
     test_speed_validation();

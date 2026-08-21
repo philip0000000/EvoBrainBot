@@ -92,6 +92,12 @@ Controls:
 * `Space`: run or pause
 * `.`: advance one tick while paused
 * `F`: enter or leave Fast-forward
+* `I`: show or hide agent information overlays
+* Left-click an agent: select it for inspection
+* Left-click empty world space: clear agent selection
+* Mouse wheel over the brain canvas: zoom the brain graph
+* Middle-mouse drag in the brain canvas: pan the brain graph
+* Drag the vertical separator: resize the simulation and information panes
 * Mouse wheel: zoom around the pointer
 * Middle-mouse drag: pan
 * `Home`: reset the camera
@@ -100,6 +106,19 @@ Fast-forward advances without drawing the world and refreshes the interface
 statistics periodically. The Target TPS input controls normal playback from 1
 through 1000 ticks per second. Save As is available from the File menu and has
 no keyboard shortcut.
+
+The resizable right-side HUD shows the selected agent's identity, energy, age,
+generation, position, direction, and four-input/two-output brain. Brain
+connections show evolved weight signs and relative magnitudes. Hover nodes or
+connections for exact information, use **Reset brain view** to fit the graph,
+and expand the parameter table for numeric values. The canvas lays out arbitrary
+layer and node counts, while the current simulation brain has four inputs, two
+outputs, and no hidden layer. It shows structure and weights, not live brain
+activity. The **Show agent information** control and `I` shortcut add energy
+bars beside visible agents. Each bar uses the reproduction threshold as its
+full reference level, not as a maximum-energy or health value. Selected-agent
+details are unavailable during Fast-forward and return after pausing if the
+selected stable ID survived.
 
 ### Portable viewer directory
 
@@ -119,8 +138,8 @@ Windows 11 development system already provides the Microsoft Visual C++ runtime.
 
 The developer benchmark measures the production renderer without advancing the
 simulation. It renders the full world and headings at 2560 x 1440, first with
-50,000 agents plus 50,000 food and then with an informational 100,000 plus
-100,000 workload:
+50,000 agents plus 50,000 food, then with an informational 100,000 plus 100,000
+workload, and finally with 50,000 energy bars enabled:
 
 ```powershell
 .\out\build\x64-release\evobrain_viewer_render_benchmark.exe

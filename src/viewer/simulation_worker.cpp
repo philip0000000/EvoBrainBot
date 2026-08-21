@@ -28,10 +28,12 @@ constexpr int maximum_ticks_per_second = 1000;
 // Builds a small render-only copy from one completed simulation tick.
 std::shared_ptr<const RenderSnapshot> make_render_snapshot(
     const Simulation& simulation,
+    const std::optional<std::uint64_t> selected_agent_id,
     const bool include_world)
 {
     auto snapshot = std::make_shared<RenderSnapshot>();
     snapshot->stats = simulation.stats();
+    snapshot->reproduction_threshold = simulation.config().reproduction_threshold;
     snapshot->contains_world = include_world;
     if (!include_world) {
         return snapshot;
@@ -39,10 +41,23 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
     snapshot->agents.reserve(simulation.agents().size());
     for (const Agent& agent : simulation.agents()) {
         snapshot->agents.push_back(AgentVisual {
+            .id = agent.id,
             .x = static_cast<float>(agent.position.x),
             .y = static_cast<float>(agent.position.y),
             .direction = static_cast<float>(agent.direction),
+            .energy = static_cast<float>(agent.energy),
         });
+        if (selected_agent_id == agent.id) {
+            snapshot->selected_agent = SelectedAgentDetails {
+                .id = agent.id,
+                .position = agent.position,
+                .direction = agent.direction,
+                .energy = agent.energy,
+                .age = agent.age,
+                .generation = agent.generation,
+                .brain = agent.brain,
+            };
+        }
     }
     snapshot->food.reserve(simulation.food().size());
     for (const Food& item : simulation.food()) {
@@ -171,14 +186,21 @@ public:
     {
         std::lock_guard lock(published_mutex_);
         published_snapshot_ = simulation_.has_value()
-            ? make_render_snapshot(*simulation_, include_world)
+            ? make_render_snapshot(*simulation_, selected_agent_id_, include_world)
             : std::shared_ptr<const RenderSnapshot> {};
+        if (include_world && selected_agent_id_ && published_snapshot_
+            && !published_snapshot_->selected_agent) {
+            // Stable IDs are never reused, so a missing selected agent can be
+            // cleared without risking selection of a later replacement.
+            selected_agent_id_.reset();
+        }
         published_status_ = WorkerStatus {
             .has_simulation = simulation_.has_value(),
             .has_unsaved_changes = unsaved_changes_,
             .playback = playback_,
             .target_ticks_per_second = target_ticks_per_second_,
             .actual_ticks_per_second = actual_ticks_per_second_,
+            .selected_agent_id = selected_agent_id_,
         };
     }
 
@@ -300,6 +322,7 @@ public:
 
     // These values are accessed only by the worker thread.
     std::optional<Simulation> simulation_;
+    std::optional<std::uint64_t> selected_agent_id_;
     PlaybackState playback_ = PlaybackState::paused;
     bool unsaved_changes_ = false;
     bool stopping_ = false;
@@ -337,6 +360,7 @@ OperationResult SimulationWorker::load_checkpoint_file(
             // Do not mutate the live state until parsing and validation have
             // both completed successfully.
             impl_->simulation_ = std::move(replacement);
+            impl_->selected_agent_id_.reset();
             impl_->playback_ = PlaybackState::paused;
             impl_->actual_ticks_per_second_ = 0.0;
             impl_->unsaved_changes_ = false;
@@ -356,6 +380,7 @@ OperationResult SimulationWorker::load_snapshot(SimulationSnapshot snapshot)
         try {
             Simulation replacement = Simulation::from_snapshot(std::move(snapshot));
             impl_->simulation_ = std::move(replacement);
+            impl_->selected_agent_id_.reset();
             impl_->playback_ = PlaybackState::paused;
             impl_->actual_ticks_per_second_ = 0.0;
             impl_->unsaved_changes_ = false;
@@ -485,6 +510,16 @@ OperationResult SimulationWorker::set_target_ticks_per_second(const int value)
         result = OperationResult {.succeeded = true};
     });
     return result;
+}
+
+void SimulationWorker::select_agent(const std::optional<std::uint64_t> agent_id)
+{
+    impl_->dispatch([&] {
+        impl_->selected_agent_id_ = agent_id;
+        // Selection is viewer metadata. Publishing validates the requested ID
+        // against the current completed state without mutating the simulation.
+        impl_->publish(impl_->playback_ != PlaybackState::fast_forward);
+    });
 }
 
 std::shared_ptr<const RenderSnapshot> SimulationWorker::latest_render_snapshot() const

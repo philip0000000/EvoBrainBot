@@ -110,6 +110,7 @@ if(EVOBRAIN_BUILD_VIEWER)
     endif()
 
     add_library(evobrain_viewer_support STATIC
+        "src/viewer/agent_selection.cpp"
         "src/viewer/camera.cpp"
         "src/viewer/simulation_worker.cpp"
     )

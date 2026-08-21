@@ -12,6 +12,11 @@ offscreen 2560 x 1440 target with the complete world visible. Each agent has a
 body and heading, each food object is visible, and the same compact instanced
 batch path used by the viewer uploads and draws every frame.
 
+The required workload keeps agent information hidden to verify that optional
+inspection rendering does not regress the existing baseline. A separate
+informational workload enables energy bars for all 50,000 agents and highlights
+one selected agent. It uses the same batched upload and draw path.
+
 The benchmark performs warm-up frames, measures complete CPU preparation,
 instance upload, and GPU drawing, then waits for GPU completion before
 reporting. It does not create simulation ticks, a swapchain, or a visible
@@ -24,12 +29,13 @@ Measured on 2026-08-21 on the target Windows 11 x64 development system:
 
 | Workload | Result | Status |
 | --- | ---: | --- |
-| 50,000 agents + 50,000 food | 133.9 FPS | Pass (75 FPS required) |
-| 100,000 agents + 100,000 food | 70.1 FPS | Informational |
+| 50,000 agents + 50,000 food | 130.6 FPS | Pass (75 FPS required) |
+| 100,000 agents + 100,000 food | 69.2 FPS | Informational |
+| 50,000 agents + 50,000 food + energy bars | 77.5 FPS | Informational |
 
 The viewer remains batched at these counts: world/background shapes use one
-draw, while all agent headings, bodies, and food use one clipped entity draw.
-There is no draw call per object.
+draw, while agent headings, bodies, selection glow, energy bars, and food use
+one clipped entity draw. There is no draw call per object or energy bar.
 
 ## Separate simulation observation
 

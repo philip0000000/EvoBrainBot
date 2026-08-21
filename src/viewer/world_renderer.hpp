@@ -1,5 +1,6 @@
 #pragma once
 
+#include "evobrain/viewer/agent_selection.hpp"
 #include "evobrain/viewer/camera.hpp"
 #include "evobrain/viewer/simulation_worker.hpp"
 
@@ -7,6 +8,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace evobrain::viewer {
@@ -19,6 +21,12 @@ struct PixelViewport {
     int height = 0;
     int target_width = 0;
     int target_height = 0;
+};
+
+// Supplies viewer-only choices that alter world presentation, never simulation.
+struct WorldRenderOptions {
+    bool show_agent_information = false;
+    std::optional<std::uint64_t> selected_agent_id;
 };
 
 // Batches the world, entities, headings, and boundaries into one GPU draw.
@@ -49,6 +57,7 @@ public:
         const PixelViewport& viewport,
         const Camera& camera,
         const RenderSnapshot* snapshot,
+        const WorldRenderOptions& options,
         std::string& error);
 
     // Issues the prepared frame as one instanced draw inside the world scissor.
