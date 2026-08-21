@@ -466,6 +466,10 @@ bool WorldRenderer::prepare(
     SDL_UnmapGPUTransferBuffer(device_, transfer_buffer_);
 
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
+    if (copy_pass == nullptr) {
+        error = SDL_GetError();
+        return false;
+    }
     SDL_GPUTransferBufferLocation source {.transfer_buffer = transfer_buffer_, .offset = 0};
     SDL_GPUBufferRegion destination {
         .buffer = instance_buffer_,
