@@ -31,6 +31,45 @@ struct UiError {
     bool open_popup = true;
 };
 
+// Returns the user-facing name of one playback state for the window title.
+const char* playback_state_name(const evobrain::viewer::PlaybackState playback)
+{
+    switch (playback) {
+    case evobrain::viewer::PlaybackState::paused:
+        return "Paused";
+    case evobrain::viewer::PlaybackState::running:
+        return "Running";
+    case evobrain::viewer::PlaybackState::fast_forward:
+        return "Fast-forward";
+    }
+    return "Unknown";
+}
+
+// Updates the native title only when its checkpoint or worker state has changed,
+// returning SDL diagnostics if the native operation fails.
+std::optional<std::string> update_window_title(
+    SDL_Window* window,
+    const std::string& filename,
+    const evobrain::viewer::WorkerStatus& status,
+    std::string& previous_title)
+{
+    std::string title = "EvoBrainBot Viewer \xE2\x80\x94 ";
+    title += status.has_simulation ? filename : "No checkpoint";
+    title += " \xE2\x80\x94 ";
+    title += playback_state_name(status.playback);
+    if (status.has_unsaved_changes) {
+        title += " *";
+    }
+    if (title == previous_title) {
+        return std::nullopt;
+    }
+    previous_title = title;
+    if (!SDL_SetWindowTitle(window, title.c_str())) {
+        return std::string {SDL_GetError()};
+    }
+    return std::nullopt;
+}
+
 struct DialogState {
     std::mutex mutex;
     bool ready = false;
@@ -585,7 +624,24 @@ int run_viewer()
     bool first_frame = true;
     int target_tps_edit = 60;
     std::string target_tps_validation;
+    std::string previous_window_title;
+    std::optional<UiError> fatal_runtime_error;
     SDL_ShowWindow(window);
+
+    // Stops simulation work and records a GPU failure that cannot be presented
+    // through ImGui because the current frame can no longer be submitted.
+    const auto stop_after_gpu_failure = [&](const char* summary, std::string detail) {
+        if (detail.empty()) {
+            detail = "SDL did not provide additional error information.";
+        }
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "%s %s", summary, detail.c_str());
+        static_cast<void>(worker.pause());
+        fatal_runtime_error = UiError {
+            .summary = summary,
+            .detail = std::move(detail),
+        };
+        running = false;
+    };
 
     // Applies a validated replacement and updates session-only path state.
     const auto load_selected_checkpoint = [&](const std::filesystem::path& path) {
@@ -644,6 +700,19 @@ int run_viewer()
     };
 
     while (running) {
+        if (const auto title_error = update_window_title(
+                window, loaded_filename, worker.status(), previous_window_title)) {
+            static_cast<void>(worker.pause());
+            SDL_LogError(
+                SDL_LOG_CATEGORY_APPLICATION,
+                "The viewer window title could not be updated. %s",
+                title_error->c_str());
+            ui_error = UiError {
+                .summary = "The viewer window title could not be updated.",
+                .detail = *title_error,
+            };
+            first_frame = true;
+        }
         std::optional<evobrain::viewer::WorkerFailure> worker_failure =
             worker.take_failure();
         std::optional<SDL_Event> waited_event;
@@ -898,7 +967,8 @@ int run_viewer()
 
         SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(gpu_device);
         if (command_buffer == nullptr) {
-            running = false;
+            stop_after_gpu_failure(
+                "A GPU command buffer could not be acquired.", SDL_GetError());
             continue;
         }
         ImGui_ImplSDLGPU3_PrepareDrawData(ImGui::GetDrawData(), command_buffer);
@@ -912,8 +982,10 @@ int run_viewer()
                 &swapchain_texture,
                 &target_width,
                 &target_height)) {
+            const std::string detail = SDL_GetError();
             SDL_CancelGPUCommandBuffer(command_buffer);
-            running = false;
+            stop_after_gpu_failure(
+                "The next viewer frame could not be acquired.", detail);
             continue;
         }
         if (swapchain_texture != nullptr) {
@@ -930,6 +1002,11 @@ int run_viewer()
                 && !world_renderer.prepare(
                     command_buffer, world_pixels, camera, snapshot.get(), renderer_error)) {
                 renderer_available = false;
+                static_cast<void>(worker.pause());
+                SDL_LogError(
+                    SDL_LOG_CATEGORY_GPU,
+                    "The world could not be rendered. %s",
+                    renderer_error.c_str());
                 ui_error = UiError {
                     .summary = "The world could not be rendered.",
                     .detail = renderer_error,
@@ -945,6 +1022,13 @@ int run_viewer()
 
             SDL_GPURenderPass* render_pass =
                 SDL_BeginGPURenderPass(command_buffer, &color_target, 1, nullptr);
+            if (render_pass == nullptr) {
+                const std::string detail = SDL_GetError();
+                SDL_CancelGPUCommandBuffer(command_buffer);
+                stop_after_gpu_failure(
+                    "The viewer render pass could not be started.", detail);
+                continue;
+            }
             if (renderer_available && render_world) {
                 world_renderer.draw(render_pass, world_pixels);
             }
@@ -952,7 +1036,22 @@ int run_viewer()
                 ImGui::GetDrawData(), command_buffer, render_pass);
             SDL_EndGPURenderPass(render_pass);
         }
-        SDL_SubmitGPUCommandBuffer(command_buffer);
+        if (!SDL_SubmitGPUCommandBuffer(command_buffer)) {
+            stop_after_gpu_failure(
+                "The viewer frame could not be submitted to the GPU.", SDL_GetError());
+        }
+    }
+
+    int exit_code = EXIT_SUCCESS;
+    if (fatal_runtime_error) {
+        const std::string message = fatal_runtime_error->summary + "\n\n"
+            + fatal_runtime_error->detail;
+        SDL_ShowSimpleMessageBox(
+            SDL_MESSAGEBOX_ERROR,
+            "EvoBrainBot Viewer",
+            message.c_str(),
+            window);
+        exit_code = EXIT_FAILURE;
     }
 
     world_renderer.shutdown();
@@ -963,7 +1062,7 @@ int run_viewer()
     SDL_DestroyGPUDevice(gpu_device);
     SDL_DestroyWindow(window);
     SDL_Quit();
-    return EXIT_SUCCESS;
+    return exit_code;
 }
 
 } // namespace
