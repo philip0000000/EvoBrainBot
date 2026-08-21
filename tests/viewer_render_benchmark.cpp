@@ -27,6 +27,7 @@ evobrain::viewer::RenderSnapshot make_snapshot(
     evobrain::viewer::RenderSnapshot snapshot;
     snapshot.stats.population = agent_count;
     snapshot.stats.food = food_count;
+    snapshot.reproduction_threshold = 1.0;
     snapshot.agents.reserve(agent_count);
     snapshot.food.reserve(food_count);
 
@@ -45,11 +46,13 @@ evobrain::viewer::RenderSnapshot make_snapshot(
     }
     for (std::size_t index = 0; index < agent_count; ++index) {
         snapshot.agents.push_back({
+            .id = static_cast<std::uint64_t>(index + 1),
             .x = coordinate(index, 3571),
             .y = coordinate(index, 6827),
             .direction = static_cast<float>(
                 std::fmod(index * 0.6180339887498948, 1.0)
                 * 2.0 * std::numbers::pi),
+            .energy = static_cast<float>(std::fmod(index * 0.1732050807568877, 1.25)),
         });
     }
     return snapshot;
@@ -63,6 +66,7 @@ bool render_frame(
     const evobrain::viewer::PixelViewport& viewport,
     const evobrain::viewer::Camera& camera,
     const evobrain::viewer::RenderSnapshot& snapshot,
+    const evobrain::viewer::WorldRenderOptions& options,
     std::string& error)
 {
     SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(device);
@@ -70,7 +74,7 @@ bool render_frame(
         error = SDL_GetError();
         return false;
     }
-    if (!renderer.prepare(command_buffer, viewport, camera, &snapshot, error)) {
+    if (!renderer.prepare(command_buffer, viewport, camera, &snapshot, options, error)) {
         SDL_CancelGPUCommandBuffer(command_buffer);
         return false;
     }
@@ -107,11 +111,13 @@ double run_scenario(
     const std::size_t agents,
     const std::size_t food,
     const int measured_frames,
+    const evobrain::viewer::WorldRenderOptions& options,
     std::string& error)
 {
     const evobrain::viewer::RenderSnapshot snapshot = make_snapshot(agents, food);
     for (int frame = 0; frame < 10; ++frame) {
-        if (!render_frame(device, target, renderer, viewport, camera, snapshot, error)) {
+        if (!render_frame(
+                device, target, renderer, viewport, camera, snapshot, options, error)) {
             return 0.0;
         }
     }
@@ -122,7 +128,8 @@ double run_scenario(
 
     const auto start = std::chrono::steady_clock::now();
     for (int frame = 0; frame < measured_frames; ++frame) {
-        if (!render_frame(device, target, renderer, viewport, camera, snapshot, error)) {
+        if (!render_frame(
+                device, target, renderer, viewport, camera, snapshot, options, error)) {
             return 0.0;
         }
     }
@@ -202,7 +209,7 @@ int run_benchmark()
     });
 
     const double acceptance_fps = run_scenario(
-        device, target, renderer, viewport, camera, 50'000, 50'000, 120, error);
+        device, target, renderer, viewport, camera, 50'000, 50'000, 120, {}, error);
     if (acceptance_fps == 0.0) {
         std::cerr << "Acceptance scenario failed: " << error << '\n';
     } else {
@@ -210,12 +217,29 @@ int run_benchmark()
                   << acceptance_fps << " render-only FPS\n";
     }
     const double observation_fps = acceptance_fps == 0.0 ? 0.0 : run_scenario(
-        device, target, renderer, viewport, camera, 100'000, 100'000, 60, error);
+        device, target, renderer, viewport, camera, 100'000, 100'000, 60, {}, error);
     if (acceptance_fps != 0.0 && observation_fps == 0.0) {
         std::cerr << "Observation scenario failed: " << error << '\n';
     } else if (observation_fps != 0.0) {
         std::cout << "100,000 agents + 100,000 food (informational): "
                   << observation_fps << " render-only FPS\n";
+    }
+    const double overlay_fps = acceptance_fps == 0.0 ? 0.0 : run_scenario(
+        device,
+        target,
+        renderer,
+        viewport,
+        camera,
+        50'000,
+        50'000,
+        60,
+        {.show_agent_information = true, .selected_agent_id = 1},
+        error);
+    if (acceptance_fps != 0.0 && overlay_fps == 0.0) {
+        std::cerr << "Agent-information scenario failed: " << error << '\n';
+    } else if (overlay_fps != 0.0) {
+        std::cout << "50,000 agents + 50,000 food + energy bars (informational): "
+                  << overlay_fps << " render-only FPS\n";
     }
 
     renderer.shutdown();

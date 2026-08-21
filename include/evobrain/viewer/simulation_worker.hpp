@@ -28,11 +28,13 @@ struct OperationResult {
     }
 };
 
-// Contains only the agent fields required by the basic world renderer.
+// Contains the lightweight fields required to draw and hit-test one agent.
 struct AgentVisual {
+    std::uint64_t id = 0;
     float x = 0.0F;
     float y = 0.0F;
     float direction = 0.0F;
+    float energy = 0.0F;
 
     bool operator==(const AgentVisual&) const = default;
 };
@@ -45,11 +47,26 @@ struct FoodVisual {
     bool operator==(const FoodVisual&) const = default;
 };
 
+// Contains the full viewer-only inspection state for one selected agent.
+struct SelectedAgentDetails {
+    std::uint64_t id = 0;
+    Vec2 position;
+    double direction = 0.0;
+    double energy = 0.0;
+    std::uint64_t age = 0;
+    std::uint64_t generation = 0;
+    BrainParameters brain {};
+
+    bool operator==(const SelectedAgentDetails&) const = default;
+};
+
 // Contains one immutable, internally consistent view of a completed tick.
 struct RenderSnapshot {
     SimulationStats stats;
+    double reproduction_threshold = 1.0;
     std::vector<AgentVisual> agents;
     std::vector<FoodVisual> food;
+    std::optional<SelectedAgentDetails> selected_agent;
     bool contains_world = true;
 
     bool operator==(const RenderSnapshot&) const = default;
@@ -62,6 +79,7 @@ struct WorkerStatus {
     PlaybackState playback = PlaybackState::paused;
     int target_ticks_per_second = 60;
     double actual_ticks_per_second = 0.0;
+    std::optional<std::uint64_t> selected_agent_id;
 
     bool operator==(const WorkerStatus&) const = default;
 };
@@ -112,6 +130,9 @@ public:
 
     // Applies a target rate in the inclusive supported range of 1 to 1000.
     [[nodiscard]] OperationResult set_target_ticks_per_second(int value);
+
+    // Selects one current stable agent ID, or clears viewer selection with null.
+    void select_agent(std::optional<std::uint64_t> agent_id);
 
     // Returns the latest immutable render snapshot, or null before a load.
     [[nodiscard]] std::shared_ptr<const RenderSnapshot> latest_render_snapshot() const;

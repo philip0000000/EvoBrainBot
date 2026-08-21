@@ -10,13 +10,19 @@
 #include <SDL3/SDL_main.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -94,7 +100,38 @@ struct ViewerUiResult {
     bool exit_discard = false;
     bool exit_cancel = false;
     std::optional<int> target_ticks_per_second;
+    bool selection_requested = false;
+    std::optional<std::uint64_t> selected_agent_id;
     evobrain::viewer::CameraViewport world_viewport;
+};
+
+struct WorldCanvasResult {
+    evobrain::viewer::CameraViewport viewport;
+    bool selection_requested = false;
+    std::optional<std::uint64_t> selected_agent_id;
+};
+
+struct BrainLayerView {
+    std::string_view name;
+};
+
+struct BrainNodeView {
+    std::size_t layer = 0;
+    std::string_view name;
+    std::optional<double> bias;
+};
+
+struct BrainConnectionView {
+    std::size_t source = 0;
+    std::size_t target = 0;
+    double weight = 0.0;
+};
+
+struct BrainViewState {
+    ImVec2 pan {0.0F, 0.0F};
+    float zoom = 1.0F;
+    std::optional<std::uint64_t> agent_id;
+    bool reset_requested = true;
 };
 
 // Native dialog callbacks can outlive a frame and run on another thread.
@@ -245,13 +282,14 @@ void draw_error_popup(std::optional<UiError>& error)
     }
 }
 
-// Draws the world canvas and applies mouse camera controls only while hovered.
-evobrain::viewer::CameraViewport draw_world_canvas(
+// Draws the world canvas and returns camera geometry plus any left-click selection.
+WorldCanvasResult draw_world_canvas(
     evobrain::viewer::Camera& camera,
-    const bool has_snapshot,
+    const evobrain::viewer::RenderSnapshot* snapshot,
     const bool fast_forwarding,
     const ImVec2 size)
 {
+    WorldCanvasResult result;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0F, 0.0F, 0.0F, 0.0F));
     ImGui::BeginChild("World", size, ImGuiChildFlags_Borders);
     const ImVec2 canvas_position = ImGui::GetCursorScreenPos();
@@ -259,33 +297,43 @@ evobrain::viewer::CameraViewport draw_world_canvas(
     ImGui::InvisibleButton(
         "World canvas",
         canvas_size,
-        ImGuiButtonFlags_MouseButtonMiddle);
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
     const bool hovered = ImGui::IsItemHovered();
 
-    evobrain::viewer::CameraViewport viewport {
+    result.viewport = evobrain::viewer::CameraViewport {
         .x = canvas_position.x,
         .y = canvas_position.y,
         .width = std::max(canvas_size.x, 1.0F),
         .height = std::max(canvas_size.y, 1.0F),
     };
-    camera.viewport_changed(viewport);
+    camera.viewport_changed(result.viewport);
     const ImGuiIO& io = ImGui::GetIO();
     if (hovered && io.MouseWheel != 0.0F) {
         camera.zoom_at(
             io.MousePos.x,
             io.MousePos.y,
             std::pow(1.2, io.MouseWheel),
-            viewport);
+            result.viewport);
     }
     if (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
-        camera.pan_pixels(io.MouseDelta.x, io.MouseDelta.y, viewport);
+        camera.pan_pixels(io.MouseDelta.x, io.MouseDelta.y, result.viewport);
+    }
+    if (!fast_forwarding && snapshot != nullptr && snapshot->contains_world
+        && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+        result.selection_requested = true;
+        result.selected_agent_id = evobrain::viewer::select_agent_at_screen(
+            *snapshot,
+            camera,
+            result.viewport,
+            io.MousePos.x,
+            io.MousePos.y);
     }
     if (fast_forwarding) {
         ImGui::GetWindowDrawList()->AddText(
             ImVec2(canvas_position.x + 12.0F, canvas_position.y + 12.0F),
             ImGui::GetColorU32(ImGuiCol_Text),
             "Fast-forwarding: world rendering is paused.");
-    } else if (!has_snapshot) {
+    } else if (snapshot == nullptr) {
         ImGui::GetWindowDrawList()->AddText(
             ImVec2(canvas_position.x + 12.0F, canvas_position.y + 12.0F),
             ImGui::GetColorU32(ImGuiCol_TextDisabled),
@@ -293,7 +341,379 @@ evobrain::viewer::CameraViewport draw_world_canvas(
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
-    return viewport;
+    return result;
+}
+
+// Returns squared screen distance from a point to one connection segment.
+float distance_to_segment_squared(
+    const ImVec2 point,
+    const ImVec2 start,
+    const ImVec2 end) noexcept
+{
+    const float segment_x = end.x - start.x;
+    const float segment_y = end.y - start.y;
+    const float length_squared = segment_x * segment_x + segment_y * segment_y;
+    const float projection = length_squared > 0.0F
+        ? std::clamp(((point.x - start.x) * segment_x
+                         + (point.y - start.y) * segment_y)
+                / length_squared,
+            0.0F,
+            1.0F)
+        : 0.0F;
+    const float closest_x = start.x + segment_x * projection;
+    const float closest_y = start.y + segment_y * projection;
+    const float delta_x = point.x - closest_x;
+    const float delta_y = point.y - closest_y;
+    return delta_x * delta_x + delta_y * delta_y;
+}
+
+// Draws an interactive layered graph without assuming a particular topology.
+void draw_brain_canvas(
+    const std::span<const BrainLayerView> layers,
+    const std::span<const BrainNodeView> nodes,
+    const std::span<const BrainConnectionView> connections,
+    BrainViewState& state)
+{
+    constexpr float canvas_height = 270.0F;
+    constexpr float horizontal_spacing = 210.0F;
+    constexpr float vertical_spacing = 72.0F;
+    if (layers.empty() || nodes.empty()) {
+        ImGui::TextDisabled("No brain topology available");
+        return;
+    }
+    if (ImGui::Button("Reset brain view")) {
+        state.reset_requested = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Wheel: zoom  Middle-drag: pan");
+
+    ImGui::BeginChild(
+        "Brain canvas", ImVec2(0.0F, canvas_height), ImGuiChildFlags_Borders,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    const ImVec2 canvas_position = ImGui::GetCursorScreenPos();
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+    const ImVec2 canvas_size {
+        std::max(available.x, 1.0F), std::max(available.y, 1.0F)};
+    ImGui::InvisibleButton(
+        "Brain canvas interaction",
+        canvas_size,
+        ImGuiButtonFlags_MouseButtonMiddle);
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec2 canvas_center {
+        canvas_position.x + canvas_size.x * 0.5F,
+        canvas_position.y + canvas_size.y * 0.5F};
+
+    std::vector<std::size_t> nodes_per_layer(layers.size(), 0);
+    for (const BrainNodeView& node : nodes) {
+        if (node.layer < nodes_per_layer.size()) {
+            ++nodes_per_layer[node.layer];
+        }
+    }
+    std::size_t maximum_nodes = 1;
+    for (const std::size_t count : nodes_per_layer) {
+        maximum_nodes = std::max(maximum_nodes, count);
+    }
+    const float graph_width = (layers.size() - 1) * horizontal_spacing;
+    const float graph_height = (maximum_nodes - 1) * vertical_spacing;
+    if (state.reset_requested) {
+        const float fit_width = canvas_size.x / std::max(graph_width + 190.0F, 1.0F);
+        const float fit_height = canvas_size.y / std::max(graph_height + 100.0F, 1.0F);
+        state.zoom = std::clamp(std::min(fit_width, fit_height), 0.1F, 1.5F);
+        state.pan = ImVec2(0.0F, 0.0F);
+        state.reset_requested = false;
+    }
+
+    const ImGuiIO& io = ImGui::GetIO();
+    if (hovered && io.MouseWheel != 0.0F) {
+        const float old_zoom = state.zoom;
+        const ImVec2 graph_anchor {
+            (io.MousePos.x - canvas_center.x - state.pan.x) / old_zoom,
+            (io.MousePos.y - canvas_center.y - state.pan.y) / old_zoom};
+        state.zoom = std::clamp(
+            state.zoom * std::pow(1.2F, io.MouseWheel), 0.1F, 5.0F);
+        state.pan = ImVec2(
+            io.MousePos.x - canvas_center.x - graph_anchor.x * state.zoom,
+            io.MousePos.y - canvas_center.y - graph_anchor.y * state.zoom);
+    }
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        state.pan.x += io.MouseDelta.x;
+        state.pan.y += io.MouseDelta.y;
+    }
+
+    std::vector<std::size_t> next_node_in_layer(layers.size(), 0);
+    std::vector<ImVec2> graph_positions(nodes.size());
+    std::vector<ImVec2> screen_positions(nodes.size());
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        const BrainNodeView& node = nodes[index];
+        if (node.layer >= layers.size()) {
+            continue;
+        }
+        const std::size_t order = next_node_in_layer[node.layer]++;
+        const float layer_height = (nodes_per_layer[node.layer] - 1) * vertical_spacing;
+        graph_positions[index] = ImVec2(
+            node.layer * horizontal_spacing - graph_width * 0.5F,
+            order * vertical_spacing - layer_height * 0.5F);
+        screen_positions[index] = ImVec2(
+            canvas_center.x + state.pan.x + graph_positions[index].x * state.zoom,
+            canvas_center.y + state.pan.y + graph_positions[index].y * state.zoom);
+    }
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    draw_list->PushClipRect(
+        canvas_position,
+        ImVec2(canvas_position.x + canvas_size.x, canvas_position.y + canvas_size.y),
+        true);
+    const auto connection_is_valid = [&](const BrainConnectionView& connection) {
+        return connection.source < nodes.size()
+            && connection.target < nodes.size()
+            && nodes[connection.source].layer < layers.size()
+            && nodes[connection.target].layer < layers.size();
+    };
+    double maximum_magnitude = 0.0;
+    for (const BrainConnectionView& connection : connections) {
+        if (connection_is_valid(connection)) {
+            maximum_magnitude = std::max(
+                maximum_magnitude, std::abs(connection.weight));
+        }
+    }
+    maximum_magnitude = std::max(maximum_magnitude, 1e-12);
+    std::optional<std::size_t> hovered_connection;
+    float hovered_connection_distance = std::numeric_limits<float>::infinity();
+    for (std::size_t index = 0; index < connections.size(); ++index) {
+        const BrainConnectionView& connection = connections[index];
+        if (!connection_is_valid(connection)) {
+            continue;
+        }
+        const float strength = static_cast<float>(
+            std::abs(connection.weight) / maximum_magnitude);
+        const float thickness = 1.0F + strength * 4.0F;
+        const ImU32 color = connection.weight > 1e-9
+            ? IM_COL32(64, 156, 255, 220)
+            : connection.weight < -1e-9
+                ? IM_COL32(255, 112, 72, 220)
+                : IM_COL32(140, 140, 140, 150);
+        draw_list->AddLine(
+            screen_positions[connection.source],
+            screen_positions[connection.target],
+            color,
+            thickness);
+        if (hovered) {
+            const float distance = distance_to_segment_squared(
+                io.MousePos,
+                screen_positions[connection.source],
+                screen_positions[connection.target]);
+            const float hover_radius = std::max(5.0F, thickness + 2.0F);
+            if (distance <= hover_radius * hover_radius
+                && distance < hovered_connection_distance) {
+                hovered_connection = index;
+                hovered_connection_distance = distance;
+            }
+        }
+    }
+
+    const float node_radius = std::clamp(7.0F * state.zoom, 4.0F, 11.0F);
+    std::optional<std::size_t> hovered_node;
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        const BrainNodeView& node = nodes[index];
+        // Malformed topology entries are ignored rather than drawing at the
+        // default origin or indexing a nonexistent layer during hover.
+        if (node.layer >= layers.size()) {
+            continue;
+        }
+        const ImU32 node_color = node.layer == 0
+            ? IM_COL32(170, 190, 215, 255)
+            : node.layer + 1 == layers.size()
+                ? IM_COL32(245, 202, 92, 255)
+                : IM_COL32(174, 132, 224, 255);
+        draw_list->AddCircleFilled(screen_positions[index], node_radius, node_color);
+        const float font_size = std::clamp(ImGui::GetFontSize() * state.zoom, 10.0F, 18.0F);
+        const ImVec2 text_size = ImGui::CalcTextSize(
+            node.name.data(), node.name.data() + node.name.size());
+        const float text_x = node.layer == 0
+            ? screen_positions[index].x - node_radius - 5.0F - text_size.x
+            : screen_positions[index].x + node_radius + 5.0F;
+        draw_list->AddText(
+            ImGui::GetFont(),
+            font_size,
+            ImVec2(text_x,
+                screen_positions[index].y - font_size * 0.5F),
+            ImGui::GetColorU32(ImGuiCol_Text),
+            node.name.data(),
+            node.name.data() + node.name.size());
+        if (hovered) {
+            const float delta_x = io.MousePos.x - screen_positions[index].x;
+            const float delta_y = io.MousePos.y - screen_positions[index].y;
+            if (delta_x * delta_x + delta_y * delta_y <= node_radius * node_radius) {
+                hovered_node = index;
+            }
+        }
+    }
+
+    for (std::size_t layer = 0; layer < layers.size(); ++layer) {
+        const float graph_x = layer * horizontal_spacing - graph_width * 0.5F;
+        const ImVec2 layer_position {
+            canvas_center.x + state.pan.x + graph_x * state.zoom,
+            canvas_center.y + state.pan.y
+                - (graph_height * 0.5F + 45.0F) * state.zoom};
+        const ImVec2 text_size = ImGui::CalcTextSize(
+            layers[layer].name.data(),
+            layers[layer].name.data() + layers[layer].name.size());
+        draw_list->AddText(
+            ImVec2(layer_position.x - text_size.x * 0.5F, layer_position.y),
+            ImGui::GetColorU32(ImGuiCol_TextDisabled),
+            layers[layer].name.data(),
+            layers[layer].name.data() + layers[layer].name.size());
+    }
+    draw_list->PopClipRect();
+
+    if (hovered_node) {
+        const BrainNodeView& node = nodes[*hovered_node];
+        if (node.bias) {
+            ImGui::SetTooltip("%.*s\nLayer: %.*s\nBias: %.17g",
+                static_cast<int>(node.name.size()), node.name.data(),
+                static_cast<int>(layers[node.layer].name.size()),
+                layers[node.layer].name.data(), *node.bias);
+        } else {
+            ImGui::SetTooltip("%.*s\nLayer: %.*s",
+                static_cast<int>(node.name.size()), node.name.data(),
+                static_cast<int>(layers[node.layer].name.size()),
+                layers[node.layer].name.data());
+        }
+    } else if (hovered_connection) {
+        const BrainConnectionView& connection = connections[*hovered_connection];
+        ImGui::SetTooltip("%.*s -> %.*s\nWeight: %.17g",
+            static_cast<int>(nodes[connection.source].name.size()),
+            nodes[connection.source].name.data(),
+            static_cast<int>(nodes[connection.target].name.size()),
+            nodes[connection.target].name.data(),
+            connection.weight);
+    }
+    ImGui::EndChild();
+}
+
+// Adapts the current direct brain to the topology-independent canvas.
+void draw_brain_map(
+    const evobrain::viewer::SelectedAgentDetails& agent,
+    BrainViewState& state)
+{
+    constexpr std::array<BrainLayerView, 2> layers {{
+        {.name = "Input layer"},
+        {.name = "Output layer"},
+    }};
+    const std::array<BrainNodeView, 6> nodes {{
+        {.layer = 0, .name = "Food direction sine"},
+        {.layer = 0, .name = "Food direction cosine"},
+        {.layer = 0, .name = "Food distance"},
+        {.layer = 0, .name = "Energy"},
+        {.layer = 1, .name = "Turn",
+         .bias = agent.brain[evobrain::brain_input_count]},
+        {.layer = 1, .name = "Movement",
+         .bias = agent.brain[evobrain::parameters_per_brain_output
+             + evobrain::brain_input_count]},
+    }};
+    std::array<BrainConnectionView,
+        evobrain::brain_input_count * evobrain::brain_output_count> connections {};
+    std::size_t connection_index = 0;
+    for (std::size_t output = 0; output < evobrain::brain_output_count; ++output) {
+        const std::size_t offset = output * evobrain::parameters_per_brain_output;
+        for (std::size_t input = 0; input < evobrain::brain_input_count; ++input) {
+            connections[connection_index++] = BrainConnectionView {
+                .source = input,
+                .target = evobrain::brain_input_count + output,
+                .weight = agent.brain[offset + input],
+            };
+        }
+    }
+    if (state.agent_id != agent.id) {
+        state.agent_id = agent.id;
+        state.reset_requested = true;
+    }
+    draw_brain_canvas(layers, nodes, connections, state);
+
+    ImGui::TextColored(ImVec4(0.25F, 0.61F, 1.0F, 1.0F), "Positive weight");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(1.0F, 0.44F, 0.28F, 1.0F), "Negative weight");
+    if (ImGui::CollapsingHeader(
+            "Exact brain parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BeginChild(
+            "Exact brain parameters table", ImVec2(0.0F, 155.0F),
+            ImGuiChildFlags_Borders);
+        if (ImGui::BeginTable("Brain weights", 3,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
+                    | ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableSetupColumn("From");
+            ImGui::TableSetupColumn("To");
+            ImGui::TableSetupColumn("Value");
+            ImGui::TableHeadersRow();
+            for (const BrainConnectionView& connection : connections) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(
+                    nodes[connection.source].name.data(),
+                    nodes[connection.source].name.data()
+                        + nodes[connection.source].name.size());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(
+                    nodes[connection.target].name.data(),
+                    nodes[connection.target].name.data()
+                        + nodes[connection.target].name.size());
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%.6g", connection.weight);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%.17g", connection.weight);
+                }
+            }
+            for (const BrainNodeView& node : nodes) {
+                if (!node.bias) {
+                    continue;
+                }
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted("Bias");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(node.name.data(), node.name.data() + node.name.size());
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%.6g", *node.bias);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%.17g", *node.bias);
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::EndChild();
+    }
+}
+
+// Draws a draggable separator and updates the width of the pane on its right.
+void draw_vertical_splitter(
+    const float height,
+    const float minimum_right_width,
+    const float maximum_right_width,
+    float& right_width)
+{
+    constexpr float splitter_width = 8.0F;
+    ImGui::InvisibleButton("Information splitter", ImVec2(splitter_width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+    if (hovered || active) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (active) {
+        // Moving the separator left grows the pane positioned to its right.
+        right_width = std::clamp(
+            right_width - ImGui::GetIO().MouseDelta.x,
+            minimum_right_width,
+            maximum_right_width);
+    }
+
+    const ImU32 color = ImGui::GetColorU32(
+        active ? ImGuiCol_SeparatorActive
+               : (hovered ? ImGuiCol_SeparatorHovered : ImGuiCol_Separator));
+    const ImVec2 minimum = ImGui::GetItemRectMin();
+    const ImVec2 maximum = ImGui::GetItemRectMax();
+    const float center_x = (minimum.x + maximum.x) * 0.5F;
+    ImGui::GetWindowDrawList()->AddLine(
+        ImVec2(center_x, minimum.y), ImVec2(center_x, maximum.y), color, 1.0F);
 }
 
 // Draws the fixed one-window viewer UI and returns main-loop actions and geometry.
@@ -304,6 +724,9 @@ ViewerUiResult draw_viewer_shell(
     std::optional<UiError>& error,
     int& target_tps_edit,
     std::string& target_tps_validation,
+    bool& show_agent_information,
+    BrainViewState& brain_view,
+    float& information_width,
     const bool confirm_replace,
     const bool confirm_overwrite,
     const bool confirm_exit,
@@ -380,8 +803,7 @@ ViewerUiResult draw_viewer_shell(
             "Target TPS",
             &target_tps_edit,
             0,
-            0,
-            ImGuiInputTextFlags_EnterReturnsTrue)) {
+            0)) {
         result.target_ticks_per_second = target_tps_edit;
     }
     ImGui::SameLine();
@@ -391,13 +813,61 @@ ViewerUiResult draw_viewer_shell(
             ImVec4(1.0F, 0.38F, 0.32F, 1.0F), "%s", target_tps_validation.c_str());
     }
 
-    constexpr float stats_width = 260.0F;
+    constexpr float splitter_width = 8.0F;
+    constexpr float minimum_world_width = 240.0F;
+    constexpr float preferred_minimum_information_width = 300.0F;
     const ImVec2 content_size = ImGui::GetContentRegionAvail();
-    const ImVec2 world_size(std::max(content_size.x - stats_width - 8.0F, 1.0F), content_size.y);
-    result.world_viewport = draw_world_canvas(
-        camera, snapshot != nullptr, fast_forwarding, world_size);
+    const float maximum_information_width =
+        std::max(content_size.x - splitter_width - minimum_world_width, 1.0F);
+    const float minimum_information_width =
+        std::min(preferred_minimum_information_width, maximum_information_width);
+    information_width = std::clamp(
+        information_width, minimum_information_width, maximum_information_width);
+    const float layout_information_width = information_width;
+    const ImVec2 world_size(
+        std::max(content_size.x - layout_information_width - splitter_width, 1.0F),
+        content_size.y);
+    const WorldCanvasResult world = draw_world_canvas(
+        camera, snapshot.get(), fast_forwarding, world_size);
+    result.world_viewport = world.viewport;
+    result.selection_requested = world.selection_requested;
+    result.selected_agent_id = world.selected_agent_id;
+    ImGui::SameLine(0.0F, 0.0F);
+    draw_vertical_splitter(
+        content_size.y,
+        minimum_information_width,
+        maximum_information_width,
+        information_width);
+    ImGui::SameLine(0.0F, 0.0F);
+    ImGui::BeginChild(
+        "Information", ImVec2(layout_information_width, 0.0F), ImGuiChildFlags_Borders);
+    ImGui::Checkbox("Show agent information", &show_agent_information);
     ImGui::SameLine();
-    ImGui::BeginChild("Statistics", ImVec2(stats_width, 0.0F), ImGuiChildFlags_Borders);
+    ImGui::TextDisabled("(I)");
+    ImGui::Separator();
+    ImGui::TextUnformatted("Selected agent");
+    ImGui::Separator();
+    if (snapshot == nullptr) {
+        ImGui::TextDisabled("No checkpoint loaded");
+    } else if (fast_forwarding && status.selected_agent_id) {
+        ImGui::TextDisabled("Unavailable during Fast-forward");
+    } else if (!snapshot->selected_agent) {
+        ImGui::TextDisabled("No agent selected");
+    } else {
+        const auto& agent = *snapshot->selected_agent;
+        ImGui::Text("ID: %llu", static_cast<unsigned long long>(agent.id));
+        ImGui::Text("Energy: %.4f / %.4f", agent.energy,
+            snapshot->reproduction_threshold);
+        ImGui::Text("Age: %llu ticks", static_cast<unsigned long long>(agent.age));
+        ImGui::Text("Generation: %llu",
+            static_cast<unsigned long long>(agent.generation));
+        ImGui::Text("Position: (%.4f, %.4f)", agent.position.x, agent.position.y);
+        ImGui::Text("Direction: %.4f rad", agent.direction);
+        ImGui::Separator();
+        ImGui::TextUnformatted("Brain structure and weights");
+        draw_brain_map(agent, brain_view);
+    }
+    ImGui::Separator();
     ImGui::TextUnformatted("Statistics");
     ImGui::Separator();
     if (snapshot == nullptr) {
@@ -622,6 +1092,9 @@ int run_viewer()
     bool running = true;
     bool renderer_available = true;
     bool first_frame = true;
+    bool show_agent_information = false;
+    BrainViewState brain_view;
+    float information_width = 390.0F;
     int target_tps_edit = 60;
     std::string target_tps_validation;
     std::string previous_window_title;
@@ -832,6 +1305,9 @@ int run_viewer()
             && ImGui::IsKeyPressed(ImGuiKey_F, false);
         const bool shortcut_reset = shortcuts_enabled
             && ImGui::IsKeyPressed(ImGuiKey_Home, false);
+        const bool shortcut_agent_information =
+            evobrain::viewer::agent_information_shortcut_pressed(
+                ImGui::IsKeyPressed(ImGuiKey_I, false), io.WantTextInput);
         const evobrain::viewer::WorkerStatus status_before_ui = worker.status();
         ViewerUiResult ui = draw_viewer_shell(
             worker,
@@ -840,6 +1316,9 @@ int run_viewer()
             ui_error,
             target_tps_edit,
             target_tps_validation,
+            show_agent_information,
+            brain_view,
+            information_width,
             confirm_replace,
             confirm_overwrite,
             confirm_exit,
@@ -849,6 +1328,12 @@ int run_viewer()
         if (shortcut_reset || reset_camera_after_load) {
             camera.reset(ui.world_viewport);
             reset_camera_after_load = false;
+        }
+        if (shortcut_agent_information) {
+            show_agent_information = !show_agent_information;
+        }
+        if (ui.selection_requested) {
+            worker.select_agent(ui.selected_agent_id);
         }
 
         if ((ui.request_open || shortcut_open) && !open_dialog_open) {
@@ -995,12 +1480,21 @@ int run_viewer()
                 static_cast<int>(target_width),
                 static_cast<int>(target_height));
             const auto snapshot = worker.latest_render_snapshot();
-            const bool render_world = worker.status().playback
+            const auto render_status = worker.status();
+            const bool render_world = render_status.playback
                     != evobrain::viewer::PlaybackState::fast_forward
                 && (!snapshot || snapshot->contains_world);
             if (renderer_available && render_world
                 && !world_renderer.prepare(
-                    command_buffer, world_pixels, camera, snapshot.get(), renderer_error)) {
+                    command_buffer,
+                    world_pixels,
+                    camera,
+                    snapshot.get(),
+                    evobrain::viewer::WorldRenderOptions {
+                        .show_agent_information = show_agent_information,
+                        .selected_agent_id = render_status.selected_agent_id,
+                    },
+                    renderer_error)) {
                 renderer_available = false;
                 static_cast<void>(worker.pause());
                 SDL_LogError(
