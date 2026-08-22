@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -33,7 +34,13 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
 {
     auto snapshot = std::make_shared<RenderSnapshot>();
     snapshot->stats = simulation.stats();
+    snapshot->diagnostics = simulation.diagnostics();
+    snapshot->world_width = simulation.config().world_width;
+    snapshot->world_height = simulation.config().world_height;
     snapshot->reproduction_threshold = simulation.config().reproduction_threshold;
+    snapshot->agent_radius = simulation.config().agent_radius;
+    snapshot->food_radius = simulation.config().food_radius;
+    snapshot->eye_range = simulation.config().eye_range;
     snapshot->contains_world = include_world;
     if (!include_world) {
         return snapshot;
@@ -46,6 +53,10 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
             .y = static_cast<float>(agent.position.y),
             .direction = static_cast<float>(agent.direction),
             .energy = static_cast<float>(agent.energy),
+            .diet = agent.diet,
+            .red = static_cast<float>(agent.color.red),
+            .green = static_cast<float>(agent.color.green),
+            .blue = static_cast<float>(agent.color.blue),
         });
         if (selected_agent_id == agent.id) {
             snapshot->selected_agent = SelectedAgentDetails {
@@ -55,6 +66,11 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
                 .energy = agent.energy,
                 .age = agent.age,
                 .generation = agent.generation,
+                .diet = agent.diet,
+                .color = agent.color,
+                .mutation_rate = agent.mutation_rate,
+                .mutation_strength = agent.mutation_strength,
+                .prior_bite_damage = agent.prior_bite_damage,
                 .brain = agent.brain,
             };
         }
@@ -62,10 +78,15 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
     snapshot->food.reserve(simulation.food().size());
     for (const Food& item : simulation.food()) {
         snapshot->food.push_back(FoodVisual {
+            .id = item.id,
             .x = static_cast<float>(item.position.x),
             .y = static_cast<float>(item.position.y),
+            .energy = static_cast<float>(item.energy),
         });
     }
+    // Ascending stable IDs make the highest ID draw last within each entity layer.
+    std::ranges::sort(snapshot->agents, {}, &AgentVisual::id);
+    std::ranges::sort(snapshot->food, {}, &FoodVisual::id);
     return snapshot;
 }
 

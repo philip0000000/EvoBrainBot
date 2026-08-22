@@ -93,6 +93,7 @@ Controls:
 * `.`: advance one tick while paused
 * `F`: enter or leave Fast-forward
 * `I`: show or hide agent information overlays
+* `D`: show or hide spatial-index and simulation-performance diagnostics
 * Left-click an agent: select it for inspection
 * Left-click empty world space: clear agent selection
 * Mouse wheel over the brain canvas: zoom the brain graph
@@ -108,17 +109,28 @@ through 1000 ticks per second. Save As is available from the File menu and has
 no keyboard shortcut.
 
 The resizable right-side HUD shows the selected agent's identity, energy, age,
-generation, position, direction, and four-input/two-output brain. Brain
+generation, position, direction, diet, evolved RGB color, mutation rate,
+mutation strength, prior-tick bite damage, and 26-input/eight-hidden/three-output brain. Brain
 connections show evolved weight signs and relative magnitudes. Hover nodes or
 connections for exact information, use **Reset brain view** to fit the graph,
 and expand the parameter table for numeric values. The canvas lays out arbitrary
-layer and node counts, while the current simulation brain has four inputs, two
-outputs, and no hidden layer. It shows structure and weights, not live brain
+layer and node counts. The brain receives RGB and proximity from six literal
+finite-range eye rays plus energy and prior-tick bite damage, and outputs turn,
+move, and eat decisions. It shows structure and weights, not live brain
 activity. The **Show agent information** control and `I` shortcut add energy
-bars beside visible agents. Each bar uses the reproduction threshold as its
-full reference level, not as a maximum-energy or health value. Selected-agent
-details are unavailable during Fast-forward and return after pausing if the
-selected stable ID survived.
+bars and green herbivore or red carnivore markers beside visible agents. For
+the selected agent it also draws both eye positions, all six maximum-length eye
+rays, and the mouth point; these overlays show geometry rather than current
+perception or brain activity. Each energy bar uses the reproduction threshold
+as its full reference level, not as a maximum-energy or health value.
+Selected-agent details are unavailable during Fast-forward and return after
+pausing if the selected stable ID survived.
+
+The **Show simulation debug** control and `D` shortcut draw the transient
+spatial-index grid without changing simulation state. Occupied cells are tinted,
+and selecting an agent highlights the conservative cells queried for its six eye
+rays. The information pane reports phase timings, active simulation threads, and
+the broad-phase candidate counts compared with the former brute-force workload.
 
 ### Portable viewer directory
 
@@ -165,15 +177,36 @@ selected configuration directory:
 .\build\Release\EvoBrainBot.exe run --seed 1234 --ticks 1000
 ```
 
-The final summary reports the completed tick count, living population, food,
-reproduction births, random agent introductions, and deaths.
+The final summary reports completed ticks; total, herbivore, and carnivore
+populations; food; reproduction births; random agent introductions; deaths;
+and agents killed through eating.
+
+### Plant-food recovery
+
+New simulations place 30 herbivore founders and 1,000 full-energy plant-food
+items in a 2.5 by 2.5 toroidal world. Below 200 living agents, the simulation
+spawns toward a ceiling of 1,000 food items. From 200 through 499 agents, the
+ceiling is 500 items. At 500 agents or more, no new food is spawned. At most
+five whole food items are added per completed tick, and crossing into a higher
+population band never deletes excess food.
+
+Every 100 completed ticks, one global regrowth pulse adds 0.025 energy to each
+surviving food item, clamped to the configured maximum of 0.25. These initial
+balance values are provisional and may change after smoke testing.
+
+Ordinary population-floor founders are always herbivores. Every 500 completed
+ticks, the simulation may introduce up to 15 random carnivore founders when at
+least 200 herbivores exist, fewer than 30 carnivores exist, and total population
+is below 500. The cohort is capped by both ceilings; natural reproduction may
+later exceed them.
 
 ### Save and resume
 
-Every successful `run` and `resume` command saves the complete final simulation
-state. If `--checkpoint-out` is omitted, the state is written to
-`autosave.evo` in the current directory, replacing an existing file with that
-name.
+Every successful `run` command saves the complete final simulation state. If
+`--checkpoint-out` is omitted from `run`, the state is written to `autosave.evo`
+in the current directory, replacing an existing file with that name. The
+`resume` command does not accept `--checkpoint-out`; it atomically replaces the
+checkpoint file supplied as its positional argument.
 
 Choose a different checkpoint path with `--checkpoint-out`:
 
@@ -182,12 +215,11 @@ Choose a different checkpoint path with `--checkpoint-out`:
     --checkpoint-out state.evo
 ```
 
-Resume the checkpoint for an additional number of ticks. The continued state is
-also saved to `autosave.evo` unless another output path is supplied:
+Resume a checkpoint for an optional additional number of ticks. The completed
+state atomically replaces the same checkpoint file:
 
 ```sh
-./build/EvoBrainBot resume --checkpoint-in state.evo --ticks 500 \
-    --checkpoint-out continued.evo
+./build/EvoBrainBot resume state.evo --ticks 500
 ```
 
 On Windows with a Visual Studio generator:
@@ -196,15 +228,19 @@ On Windows with a Visual Studio generator:
 .\build\Release\EvoBrainBot.exe run --seed 1234 --ticks 1000 `
     --checkpoint-out state.evo
 
-.\build\Release\EvoBrainBot.exe resume --checkpoint-in state.evo --ticks 500 `
-    --checkpoint-out continued.evo
+.\build\Release\EvoBrainBot.exe resume state.evo --ticks 500
 ```
 
-`--ticks` always means the ticks executed by the current command. A resumed run
-obtains its original seed, configuration, accumulated statistics, entities, and
+For `resume`, `--ticks` means the maximum additional ticks executed by the
+current command. Omit it to continue until `Q`, `q`, `SIGINT`, or `SIGTERM`
+requests a graceful stop. An attached terminal displays live cumulative
+statistics and accepts `Q` without Enter. Non-interactive Linux or RunPod jobs
+can stop gracefully through `SIGINT` or `SIGTERM`. A resumed run obtains its
+original seed, configuration, accumulated statistics, entities, and
 random-generator state from the checkpoint.
 
-Checkpoints use a versioned binary format. Unsupported, incomplete, and invalid
+Checkpoints use version 3 of the binary format and preserve the complete
+predator-prey state. Older and other unsupported, incomplete, or invalid
 checkpoint files are rejected instead of being partially loaded.
 
 Display the available commands or help for `run` with:

@@ -142,6 +142,13 @@ void test_complete_render_snapshot()
     expect(rendered->reproduction_threshold
             == simulation.config().reproduction_threshold,
         "render snapshot contains the energy-bar reference threshold");
+    expect(rendered->world_width == simulation.config().world_width
+            && rendered->world_height == simulation.config().world_height,
+        "render snapshot contains configured world dimensions");
+    expect(rendered->agent_radius == simulation.config().agent_radius
+            && rendered->food_radius == simulation.config().food_radius
+            && rendered->eye_range == simulation.config().eye_range,
+        "render snapshot contains configured body and eye geometry");
     expect(rendered->agents.front().id == simulation.agents().front().id
             && rendered->agents.front().energy
                 == static_cast<float>(simulation.agents().front().energy),
@@ -151,6 +158,14 @@ void test_complete_render_snapshot()
         && rendered->agents.front().y
             == static_cast<float>(simulation.agents().front().position.y),
         "agent visual coordinates match the same simulation state");
+    expect(rendered->agents.front().diet == simulation.agents().front().diet
+            && rendered->agents.front().red
+                == static_cast<float>(simulation.agents().front().color.red)
+            && rendered->agents.front().green
+                == static_cast<float>(simulation.agents().front().color.green)
+            && rendered->agents.front().blue
+                == static_cast<float>(simulation.agents().front().color.blue),
+        "agent visual contains diet and evolved body color");
 }
 
 // Verifies full inspection state is published only for the selected stable ID.
@@ -171,7 +186,11 @@ void test_selected_agent_details()
         expect(details.id == selected.id && details.position == selected.position
                 && details.direction == selected.direction
                 && details.energy == selected.energy && details.age == selected.age
-                && details.generation == selected.generation,
+                && details.generation == selected.generation
+                && details.diet == selected.diet && details.color == selected.color
+                && details.mutation_rate == selected.mutation_rate
+                && details.mutation_strength == selected.mutation_strength
+                && details.prior_bite_damage == selected.prior_bite_damage,
             "selected details match one complete agent state");
         expect(details.brain == selected.brain,
             "selected details contain the exact evolved brain parameters");
@@ -214,6 +233,8 @@ void test_selected_agent_death()
     config.initial_population = 1;
     config.minimum_population = 1;
     config.target_food_count = 0;
+    config.food_boost_population_threshold = 0;
+    config.boosted_food_count = 0;
     config.initial_energy = 0.01;
     config.living_energy_cost = 1.0;
     config.movement_energy_cost = 0.0;
@@ -237,21 +258,22 @@ void test_agent_hit_testing()
     const evobrain::viewer::CameraViewport viewport {
         .width = 1000.0, .height = 1000.0};
     evobrain::viewer::Camera camera;
+    camera.set_world_dimensions(2.5, 2.5, viewport);
     camera.reset(viewport);
     evobrain::viewer::RenderSnapshot snapshot;
     snapshot.agents = {
-        {.id = 9, .x = 0.5F, .y = 0.5F},
-        {.id = 3, .x = 0.5F, .y = 0.5F},
+        {.id = 9, .x = 1.25F, .y = 1.25F},
+        {.id = 3, .x = 1.25F, .y = 1.25F},
     };
     expect(evobrain::viewer::select_agent_at_screen(
                snapshot, camera, viewport, 500.0, 500.0)
-            == std::uint64_t {3},
-        "overlapping equal-distance agents select the lowest stable ID");
+            == std::uint64_t {9},
+        "overlapping equal-distance agents select the highest stable ID");
     expect(!evobrain::viewer::select_agent_at_screen(
                 snapshot, camera, viewport, 100.0, 100.0),
         "clicking outside every rendered body selects no agent");
 
-    snapshot.agents = {{.id = 77, .x = 0.001F, .y = 0.5F}};
+    snapshot.agents = {{.id = 77, .x = 0.001F, .y = 1.25F}};
     expect(evobrain::viewer::select_agent_at_screen(
                snapshot, camera, viewport, 999.0, 500.0)
             == std::uint64_t {77},
@@ -408,19 +430,20 @@ void test_fast_forward_snapshot_policy()
         "Pause restores a surviving selection or clears a dead selection");
 }
 
-// Verifies reset transforms the unit world consistently for a wide viewport.
+// Verifies reset transforms configurable world dimensions consistently.
 void test_camera_reset_and_transform()
 {
     const evobrain::viewer::CameraViewport viewport {
         .x = 10.0, .y = 20.0, .width = 1600.0, .height = 900.0};
     evobrain::viewer::Camera camera;
+    camera.set_world_dimensions(2.5, 2.5, viewport);
     camera.reset(viewport);
 
-    const evobrain::Vec2 center = camera.world_to_screen({.x = 0.5, .y = 0.5}, viewport);
+    const evobrain::Vec2 center = camera.world_to_screen({.x = 1.25, .y = 1.25}, viewport);
     expect(center == evobrain::Vec2 {.x = 810.0, .y = 470.0},
         "camera reset centers the world in its viewport");
     expect(camera.screen_to_world(center.x, center.y, viewport)
-            == evobrain::Vec2 {.x = 0.5, .y = 0.5},
+            == evobrain::Vec2 {.x = 1.25, .y = 1.25},
         "camera screen and world transforms invert at the center");
     expect(camera.zoom() == 1.0, "camera reset restores 1x zoom");
 }
@@ -431,6 +454,7 @@ void test_camera_zoom_and_pan_limits()
     const evobrain::viewer::CameraViewport viewport {
         .width = 900.0, .height = 900.0};
     evobrain::viewer::Camera camera;
+    camera.set_world_dimensions(2.5, 2.5, viewport);
     const evobrain::Vec2 before = camera.screen_to_world(675.0, 225.0, viewport);
     camera.zoom_at(675.0, 225.0, 2.0, viewport);
     const evobrain::Vec2 after = camera.screen_to_world(675.0, 225.0, viewport);
@@ -443,19 +467,20 @@ void test_camera_zoom_and_pan_limits()
         "camera clamps maximum zoom");
     camera.pan_pixels(-1e9, -1e9, viewport);
     const auto high_bounds = camera.visible_bounds(viewport);
-    expect(high_bounds.maximum_x <= evobrain::viewer::Camera::outer_maximum + 1e-12
-            && high_bounds.maximum_y <= evobrain::viewer::Camera::outer_maximum + 1e-12,
+    const auto outer = camera.outer_bounds();
+    expect(high_bounds.maximum_x <= outer.maximum_x + 1e-12
+            && high_bounds.maximum_y <= outer.maximum_y + 1e-12,
         "camera pan stops at the outer maximum boundary");
     camera.pan_pixels(1e9, 1e9, viewport);
     const auto low_bounds = camera.visible_bounds(viewport);
-    expect(low_bounds.minimum_x >= evobrain::viewer::Camera::outer_minimum - 1e-12
-            && low_bounds.minimum_y >= evobrain::viewer::Camera::outer_minimum - 1e-12,
+    expect(low_bounds.minimum_x >= outer.minimum_x - 1e-12
+            && low_bounds.minimum_y >= outer.minimum_y - 1e-12,
         "camera pan stops at the outer minimum boundary");
 
     camera.zoom_at(450.0, 450.0, 1e-9, viewport);
     expect(camera.zoom() == evobrain::viewer::Camera::minimum_zoom,
         "camera clamps minimum zoom");
-    expect(camera.center() == evobrain::Vec2 {.x = 0.5, .y = 0.5},
+    expect(camera.center() == evobrain::Vec2 {.x = 1.25, .y = 1.25},
         "fully zoomed-out camera centers the complete outer world");
 }
 
@@ -465,6 +490,7 @@ void test_camera_resize_preservation()
     const evobrain::viewer::CameraViewport square {
         .width = 800.0, .height = 800.0};
     evobrain::viewer::Camera camera;
+    camera.set_world_dimensions(2.5, 2.5, square);
     camera.zoom_at(400.0, 400.0, 4.0, square);
     camera.pan_pixels(-80.0, 40.0, square);
     const evobrain::Vec2 before_center = camera.center();

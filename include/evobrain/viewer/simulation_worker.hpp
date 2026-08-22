@@ -35,14 +35,20 @@ struct AgentVisual {
     float y = 0.0F;
     float direction = 0.0F;
     float energy = 0.0F;
+    Diet diet = Diet::herbivore;
+    float red = 0.0F;
+    float green = 0.0F;
+    float blue = 0.0F;
 
     bool operator==(const AgentVisual&) const = default;
 };
 
 // Contains only the position required to render one food item.
 struct FoodVisual {
+    std::uint64_t id = 0;
     float x = 0.0F;
     float y = 0.0F;
+    float energy = 0.0F;
 
     bool operator==(const FoodVisual&) const = default;
 };
@@ -55,6 +61,11 @@ struct SelectedAgentDetails {
     double energy = 0.0;
     std::uint64_t age = 0;
     std::uint64_t generation = 0;
+    Diet diet = Diet::herbivore;
+    AgentColor color;
+    double mutation_rate = 0.0;
+    double mutation_strength = 0.0;
+    double prior_bite_damage = 0.0;
     BrainParameters brain {};
 
     bool operator==(const SelectedAgentDetails&) const = default;
@@ -63,7 +74,13 @@ struct SelectedAgentDetails {
 // Contains one immutable, internally consistent view of a completed tick.
 struct RenderSnapshot {
     SimulationStats stats;
+    SimulationDiagnostics diagnostics;
+    double world_width = 2.5;
+    double world_height = 2.5;
     double reproduction_threshold = 1.0;
+    double agent_radius = 0.010;
+    double food_radius = 0.005;
+    double eye_range = 0.250;
     std::vector<AgentVisual> agents;
     std::vector<FoodVisual> food;
     std::optional<SelectedAgentDetails> selected_agent;

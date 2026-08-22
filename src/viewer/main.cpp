@@ -306,6 +306,10 @@ WorldCanvasResult draw_world_canvas(
         .width = std::max(canvas_size.x, 1.0F),
         .height = std::max(canvas_size.y, 1.0F),
     };
+    if (snapshot != nullptr) {
+        camera.set_world_dimensions(
+            snapshot->world_width, snapshot->world_height, result.viewport);
+    }
     camera.viewport_changed(result.viewport);
     const ImGuiIO& io = ImGui::GetIO();
     if (hovered && io.MouseWheel != 0.0F) {
@@ -591,37 +595,60 @@ void draw_brain_canvas(
     ImGui::EndChild();
 }
 
-// Adapts the current direct brain to the topology-independent canvas.
+// Adapts the fixed 26-to-8-to-3 brain to the topology-independent canvas.
 void draw_brain_map(
     const evobrain::viewer::SelectedAgentDetails& agent,
     BrainViewState& state)
 {
-    constexpr std::array<BrainLayerView, 2> layers {{
+    constexpr std::array<BrainLayerView, 3> layers {{
         {.name = "Input layer"},
+        {.name = "Hidden layer"},
         {.name = "Output layer"},
     }};
-    const std::array<BrainNodeView, 6> nodes {{
-        {.layer = 0, .name = "Food direction sine"},
-        {.layer = 0, .name = "Food direction cosine"},
-        {.layer = 0, .name = "Food distance"},
-        {.layer = 0, .name = "Energy"},
-        {.layer = 1, .name = "Turn",
-         .bias = agent.brain[evobrain::brain_input_count]},
-        {.layer = 1, .name = "Movement",
-         .bias = agent.brain[evobrain::parameters_per_brain_output
-             + evobrain::brain_input_count]},
+    constexpr std::array<std::string_view, evobrain::brain_input_count> input_names {{
+        "Left -90 red", "Left -90 green", "Left -90 blue", "Left -90 proximity",
+        "Left -45 red", "Left -45 green", "Left -45 blue", "Left -45 proximity",
+        "Left 0 red", "Left 0 green", "Left 0 blue", "Left 0 proximity",
+        "Right 0 red", "Right 0 green", "Right 0 blue", "Right 0 proximity",
+        "Right +45 red", "Right +45 green", "Right +45 blue", "Right +45 proximity",
+        "Right +90 red", "Right +90 green", "Right +90 blue", "Right +90 proximity",
+        "Energy", "Prior bite damage",
     }};
-    std::array<BrainConnectionView,
-        evobrain::brain_input_count * evobrain::brain_output_count> connections {};
-    std::size_t connection_index = 0;
+    constexpr std::array<std::string_view, evobrain::brain_hidden_count> hidden_names {{
+        "Hidden 1", "Hidden 2", "Hidden 3", "Hidden 4",
+        "Hidden 5", "Hidden 6", "Hidden 7", "Hidden 8",
+    }};
+    constexpr std::array<std::string_view, evobrain::brain_output_count> output_names {{
+        "Turn", "Move", "Eat",
+    }};
+    std::vector<BrainNodeView> nodes;
+    nodes.reserve(evobrain::brain_input_count + evobrain::brain_hidden_count
+        + evobrain::brain_output_count);
+    for (const std::string_view name : input_names) nodes.push_back({.layer = 0, .name = name});
+    for (std::size_t hidden = 0; hidden < evobrain::brain_hidden_count; ++hidden) {
+        nodes.push_back({.layer = 1, .name = hidden_names[hidden],
+            .bias = agent.brain[evobrain::hidden_bias_offset + hidden]});
+    }
     for (std::size_t output = 0; output < evobrain::brain_output_count; ++output) {
-        const std::size_t offset = output * evobrain::parameters_per_brain_output;
+        nodes.push_back({.layer = 2, .name = output_names[output],
+            .bias = agent.brain[evobrain::output_bias_offset + output]});
+    }
+    std::vector<BrainConnectionView> connections;
+    connections.reserve(evobrain::input_hidden_weight_count
+        + evobrain::brain_hidden_count * evobrain::brain_output_count);
+    for (std::size_t hidden = 0; hidden < evobrain::brain_hidden_count; ++hidden) {
         for (std::size_t input = 0; input < evobrain::brain_input_count; ++input) {
-            connections[connection_index++] = BrainConnectionView {
-                .source = input,
-                .target = evobrain::brain_input_count + output,
-                .weight = agent.brain[offset + input],
-            };
+            connections.push_back({.source = input,
+                .target = evobrain::brain_input_count + hidden,
+                .weight = agent.brain[hidden * evobrain::brain_input_count + input]});
+        }
+    }
+    for (std::size_t output = 0; output < evobrain::brain_output_count; ++output) {
+        for (std::size_t hidden = 0; hidden < evobrain::brain_hidden_count; ++hidden) {
+            connections.push_back({.source = evobrain::brain_input_count + hidden,
+                .target = evobrain::brain_input_count + evobrain::brain_hidden_count + output,
+                .weight = agent.brain[evobrain::hidden_output_weight_offset
+                    + output * evobrain::brain_hidden_count + hidden]});
         }
     }
     if (state.agent_id != agent.id) {
@@ -725,6 +752,7 @@ ViewerUiResult draw_viewer_shell(
     int& target_tps_edit,
     std::string& target_tps_validation,
     bool& show_agent_information,
+    bool& show_debug,
     BrainViewState& brain_view,
     float& information_width,
     const bool confirm_replace,
@@ -844,6 +872,9 @@ ViewerUiResult draw_viewer_shell(
     ImGui::Checkbox("Show agent information", &show_agent_information);
     ImGui::SameLine();
     ImGui::TextDisabled("(I)");
+    ImGui::Checkbox("Show simulation debug", &show_debug);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(D)");
     ImGui::Separator();
     ImGui::TextUnformatted("Selected agent");
     ImGui::Separator();
@@ -863,6 +894,16 @@ ViewerUiResult draw_viewer_shell(
             static_cast<unsigned long long>(agent.generation));
         ImGui::Text("Position: (%.4f, %.4f)", agent.position.x, agent.position.y);
         ImGui::Text("Direction: %.4f rad", agent.direction);
+        ImGui::Text("Diet: %s", agent.diet == evobrain::Diet::herbivore
+            ? "Herbivore" : "Carnivore");
+        ImGui::ColorButton("Body color", ImVec4(static_cast<float>(agent.color.red),
+            static_cast<float>(agent.color.green), static_cast<float>(agent.color.blue), 1.0F));
+        ImGui::SameLine();
+        ImGui::Text("RGB: %.6f, %.6f, %.6f", agent.color.red,
+            agent.color.green, agent.color.blue);
+        ImGui::Text("Mutation rate: %.8f", agent.mutation_rate);
+        ImGui::Text("Mutation strength: %.8f", agent.mutation_strength);
+        ImGui::Text("Prior bite damage: %.6f", agent.prior_bite_damage);
         ImGui::Separator();
         ImGui::TextUnformatted("Brain structure and weights");
         draw_brain_map(agent, brain_view);
@@ -877,16 +918,42 @@ ViewerUiResult draw_viewer_shell(
         ImGui::Text("Seed: %llu", static_cast<unsigned long long>(snapshot->stats.seed));
         ImGui::Text("Tick: %llu", static_cast<unsigned long long>(snapshot->stats.completed_ticks));
         ImGui::Text("Population: %llu", static_cast<unsigned long long>(snapshot->stats.population));
+        ImGui::Text("Herbivores: %llu", static_cast<unsigned long long>(snapshot->stats.herbivores));
+        ImGui::Text("Carnivores: %llu", static_cast<unsigned long long>(snapshot->stats.carnivores));
         ImGui::Text("Food: %llu", static_cast<unsigned long long>(snapshot->stats.food));
         ImGui::Text("Births: %llu", static_cast<unsigned long long>(snapshot->stats.births));
         ImGui::Text("Introduced agents: %llu",
             static_cast<unsigned long long>(snapshot->stats.introduced_agents));
         ImGui::Text("Deaths: %llu", static_cast<unsigned long long>(snapshot->stats.deaths));
+        ImGui::Text("Agents eaten: %llu", static_cast<unsigned long long>(snapshot->stats.agents_eaten));
         ImGui::Separator();
         ImGui::Text("Requested TPS: %d", status.target_ticks_per_second);
         ImGui::Text("Actual TPS: %.1f", status.actual_ticks_per_second);
         ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
         ImGui::Text("Zoom: %.2fx", camera.zoom());
+        if (show_debug) {
+            const auto& diagnostics = snapshot->diagnostics;
+            ImGui::Separator();
+            ImGui::TextUnformatted("Simulation debug");
+            ImGui::Text("Spatial grid: %llu x %llu",
+                static_cast<unsigned long long>(diagnostics.spatial_columns),
+                static_cast<unsigned long long>(diagnostics.spatial_rows));
+            ImGui::Text("Execution threads: %llu",
+                static_cast<unsigned long long>(diagnostics.execution_threads));
+            ImGui::Text("Tick: %.3f ms", diagnostics.total_milliseconds);
+            ImGui::Text("Spatial index: %.3f ms", diagnostics.spatial_index_milliseconds);
+            ImGui::Text("Sensing + brains: %.3f ms",
+                diagnostics.sensing_brain_milliseconds);
+            ImGui::Text("Movement: %.3f ms", diagnostics.movement_milliseconds);
+            ImGui::Text("Bites: %.3f ms", diagnostics.bite_milliseconds);
+            ImGui::Text("Lifecycle: %.3f ms", diagnostics.lifecycle_milliseconds);
+            ImGui::Text("Vision candidates: %llu / %llu",
+                static_cast<unsigned long long>(diagnostics.vision_candidate_tests),
+                static_cast<unsigned long long>(diagnostics.vision_brute_force_tests));
+            ImGui::Text("Bite candidates: %llu / %llu",
+                static_cast<unsigned long long>(diagnostics.bite_candidate_tests),
+                static_cast<unsigned long long>(diagnostics.bite_brute_force_tests));
+        }
     }
     ImGui::EndChild();
     if (reset_requested) {
@@ -1093,6 +1160,7 @@ int run_viewer()
     bool renderer_available = true;
     bool first_frame = true;
     bool show_agent_information = false;
+    bool show_debug = false;
     BrainViewState brain_view;
     float information_width = 390.0F;
     int target_tps_edit = 60;
@@ -1308,6 +1376,8 @@ int run_viewer()
         const bool shortcut_agent_information =
             evobrain::viewer::agent_information_shortcut_pressed(
                 ImGui::IsKeyPressed(ImGuiKey_I, false), io.WantTextInput);
+        const bool shortcut_debug = shortcuts_enabled
+            && ImGui::IsKeyPressed(ImGuiKey_D, false);
         const evobrain::viewer::WorkerStatus status_before_ui = worker.status();
         ViewerUiResult ui = draw_viewer_shell(
             worker,
@@ -1317,6 +1387,7 @@ int run_viewer()
             target_tps_edit,
             target_tps_validation,
             show_agent_information,
+            show_debug,
             brain_view,
             information_width,
             confirm_replace,
@@ -1331,6 +1402,9 @@ int run_viewer()
         }
         if (shortcut_agent_information) {
             show_agent_information = !show_agent_information;
+        }
+        if (shortcut_debug) {
+            show_debug = !show_debug;
         }
         if (ui.selection_requested) {
             worker.select_agent(ui.selected_agent_id);
@@ -1492,6 +1566,7 @@ int run_viewer()
                     snapshot.get(),
                     evobrain::viewer::WorldRenderOptions {
                         .show_agent_information = show_agent_information,
+                        .show_debug = show_debug,
                         .selected_agent_id = render_status.selected_agent_id,
                     },
                     renderer_error)) {

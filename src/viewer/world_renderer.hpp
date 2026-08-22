@@ -26,6 +26,7 @@ struct PixelViewport {
 // Supplies viewer-only choices that alter world presentation, never simulation.
 struct WorldRenderOptions {
     bool show_agent_information = false;
+    bool show_debug = false;
     std::optional<std::uint64_t> selected_agent_id;
 };
 

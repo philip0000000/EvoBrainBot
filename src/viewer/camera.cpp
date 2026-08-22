@@ -13,23 +13,41 @@ double valid_dimension(const double value) noexcept
 }
 
 // Clamps one camera axis, centering views wider than the allowed outer range.
-double clamp_axis(const double value, const double half_extent) noexcept
+double clamp_axis(
+    const double value,
+    const double half_extent,
+    const double outer_minimum,
+    const double outer_maximum) noexcept
 {
-    const double outer_half_extent = (Camera::outer_maximum - Camera::outer_minimum) * 0.5;
+    const double outer_half_extent = (outer_maximum - outer_minimum) * 0.5;
     if (half_extent >= outer_half_extent) {
-        return (Camera::outer_minimum + Camera::outer_maximum) * 0.5;
+        return (outer_minimum + outer_maximum) * 0.5;
     }
     return std::clamp(
         value,
-        Camera::outer_minimum + half_extent,
-        Camera::outer_maximum - half_extent);
+        outer_minimum + half_extent,
+        outer_maximum - half_extent);
 }
 
 } // namespace
 
+void Camera::set_world_dimensions(
+    const double width,
+    const double height,
+    const CameraViewport& viewport) noexcept
+{
+    if (!std::isfinite(width) || !std::isfinite(height) || width <= 0.0 || height <= 0.0
+        || (width == world_width_ && height == world_height_)) {
+        return;
+    }
+    world_width_ = width;
+    world_height_ = height;
+    reset(viewport);
+}
+
 void Camera::reset(const CameraViewport& viewport) noexcept
 {
-    center_ = Vec2 {.x = 0.5, .y = 0.5};
+    center_ = Vec2 {.x = world_width_ * 0.5, .y = world_height_ * 0.5};
     zoom_ = 1.0;
     clamp_center(viewport);
 }
@@ -119,19 +137,39 @@ double Camera::zoom() const noexcept
     return zoom_;
 }
 
+double Camera::world_width() const noexcept
+{
+    return world_width_;
+}
+
+double Camera::world_height() const noexcept
+{
+    return world_height_;
+}
+
+WorldBounds Camera::outer_bounds() const noexcept
+{
+    return {.minimum_x = -world_width_ * 0.5,
+        .minimum_y = -world_height_ * 0.5,
+        .maximum_x = world_width_ * 1.5,
+        .maximum_y = world_height_ * 1.5};
+}
+
 double Camera::scale(const CameraViewport& viewport) const noexcept
 {
-    return std::min(valid_dimension(viewport.width), valid_dimension(viewport.height))
+    return std::min(valid_dimension(viewport.width) / world_width_,
+               valid_dimension(viewport.height) / world_height_)
         * zoom_;
 }
 
 void Camera::clamp_center(const CameraViewport& viewport) noexcept
 {
     const WorldBounds bounds = visible_bounds(viewport);
+    const WorldBounds outer = outer_bounds();
     const double half_width = (bounds.maximum_x - bounds.minimum_x) * 0.5;
     const double half_height = (bounds.maximum_y - bounds.minimum_y) * 0.5;
-    center_.x = clamp_axis(center_.x, half_width);
-    center_.y = clamp_axis(center_.y, half_height);
+    center_.x = clamp_axis(center_.x, half_width, outer.minimum_x, outer.maximum_x);
+    center_.y = clamp_axis(center_.y, half_height, outer.minimum_y, outer.maximum_y);
 }
 
 } // namespace evobrain::viewer

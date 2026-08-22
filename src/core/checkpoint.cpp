@@ -19,7 +19,7 @@ namespace {
 constexpr std::array<char, 8> checkpoint_identifier {
     'E', 'V', 'O', 'B', 'R', 'A', 'I', 'N',
 };
-constexpr std::uint32_t checkpoint_version = 1;
+constexpr std::uint32_t checkpoint_version = 3;
 
 // Writes primitive values using a platform-independent little-endian encoding.
 class BinaryWriter {
@@ -130,7 +130,7 @@ std::size_t collection_size(const std::uint64_t value)
     return static_cast<std::size_t>(value);
 }
 
-// Writes every provisional configuration field in stable version-one order.
+// Writes every provisional configuration field in stable version-three order.
 void write_config(BinaryWriter& writer, const SimulationConfig& config)
 {
     writer.unsigned_64(config.seed);
@@ -138,22 +138,46 @@ void write_config(BinaryWriter& writer, const SimulationConfig& config)
     writer.unsigned_64(config.minimum_population);
     writer.unsigned_64(config.target_food_count);
     writer.unsigned_64(config.food_population_threshold);
+    writer.unsigned_64(config.food_boost_population_threshold);
+    writer.unsigned_64(config.boosted_food_count);
+    writer.unsigned_64(config.maximum_new_food_per_tick);
+    writer.unsigned_64(config.food_regrowth_interval_ticks);
+    writer.unsigned_64(config.carnivore_introduction_interval_ticks);
+    writer.unsigned_64(config.carnivore_introduction_herbivore_threshold);
+    writer.unsigned_64(config.carnivore_introduction_ceiling);
+    writer.unsigned_64(config.carnivore_introduction_population_ceiling);
+    writer.unsigned_64(config.carnivore_introduction_batch);
+    writer.real(config.world_width);
+    writer.real(config.world_height);
     writer.real(config.initial_energy);
     writer.real(config.food_energy);
+    writer.real(config.food_regrowth_amount);
     writer.real(config.living_energy_cost);
     writer.real(config.movement_energy_cost);
     writer.real(config.reproduction_threshold);
-    writer.real(config.eating_radius);
     writer.real(config.maximum_movement_per_tick);
     writer.real(config.maximum_turn_per_tick);
+    writer.real(config.agent_radius);
+    writer.real(config.food_radius);
+    writer.real(config.eye_range);
+    writer.real(config.eat_threshold);
+    writer.real(config.eat_attempt_energy_cost);
+    writer.real(config.bite_amount_per_tick);
     writer.real(config.initial_brain_parameter_minimum);
     writer.real(config.initial_brain_parameter_maximum);
-    writer.real(config.mutation_strength);
     writer.real(config.brain_parameter_minimum);
     writer.real(config.brain_parameter_maximum);
+    writer.real(config.founder_mutation_rate_minimum);
+    writer.real(config.founder_mutation_rate_maximum);
+    writer.real(config.founder_mutation_strength_minimum);
+    writer.real(config.founder_mutation_strength_maximum);
+    writer.real(config.brain_mutation_scale);
+    writer.real(config.color_mutation_scale);
+    writer.real(config.mutation_rate_mutation_scale);
+    writer.real(config.mutation_strength_mutation_scale);
 }
 
-// Reads every version-one configuration field in serialized order.
+// Reads every version-three configuration field in serialized order.
 SimulationConfig read_config(BinaryReader& reader)
 {
     SimulationConfig config {.seed = reader.unsigned_64()};
@@ -161,19 +185,43 @@ SimulationConfig read_config(BinaryReader& reader)
     config.minimum_population = reader.unsigned_64();
     config.target_food_count = reader.unsigned_64();
     config.food_population_threshold = reader.unsigned_64();
+    config.food_boost_population_threshold = reader.unsigned_64();
+    config.boosted_food_count = reader.unsigned_64();
+    config.maximum_new_food_per_tick = reader.unsigned_64();
+    config.food_regrowth_interval_ticks = reader.unsigned_64();
+    config.carnivore_introduction_interval_ticks = reader.unsigned_64();
+    config.carnivore_introduction_herbivore_threshold = reader.unsigned_64();
+    config.carnivore_introduction_ceiling = reader.unsigned_64();
+    config.carnivore_introduction_population_ceiling = reader.unsigned_64();
+    config.carnivore_introduction_batch = reader.unsigned_64();
+    config.world_width = reader.real();
+    config.world_height = reader.real();
     config.initial_energy = reader.real();
     config.food_energy = reader.real();
+    config.food_regrowth_amount = reader.real();
     config.living_energy_cost = reader.real();
     config.movement_energy_cost = reader.real();
     config.reproduction_threshold = reader.real();
-    config.eating_radius = reader.real();
     config.maximum_movement_per_tick = reader.real();
     config.maximum_turn_per_tick = reader.real();
+    config.agent_radius = reader.real();
+    config.food_radius = reader.real();
+    config.eye_range = reader.real();
+    config.eat_threshold = reader.real();
+    config.eat_attempt_energy_cost = reader.real();
+    config.bite_amount_per_tick = reader.real();
     config.initial_brain_parameter_minimum = reader.real();
     config.initial_brain_parameter_maximum = reader.real();
-    config.mutation_strength = reader.real();
     config.brain_parameter_minimum = reader.real();
     config.brain_parameter_maximum = reader.real();
+    config.founder_mutation_rate_minimum = reader.real();
+    config.founder_mutation_rate_maximum = reader.real();
+    config.founder_mutation_strength_minimum = reader.real();
+    config.founder_mutation_strength_maximum = reader.real();
+    config.brain_mutation_scale = reader.real();
+    config.color_mutation_scale = reader.real();
+    config.mutation_rate_mutation_scale = reader.real();
+    config.mutation_strength_mutation_scale = reader.real();
     return config;
 }
 
@@ -187,12 +235,19 @@ void write_agent(BinaryWriter& writer, const Agent& agent)
     writer.real(agent.energy);
     writer.unsigned_64(agent.age);
     writer.unsigned_64(agent.generation);
+    writer.byte(static_cast<std::uint8_t>(agent.diet));
+    writer.real(agent.color.red);
+    writer.real(agent.color.green);
+    writer.real(agent.color.blue);
+    writer.real(agent.mutation_rate);
+    writer.real(agent.mutation_strength);
+    writer.real(agent.prior_bite_damage);
     for (const double parameter : agent.brain) {
         writer.real(parameter);
     }
 }
 
-// Reads one complete agent from the version-one field sequence.
+// Reads one complete agent from the version-three field sequence.
 Agent read_agent(BinaryReader& reader)
 {
     Agent agent {
@@ -202,6 +257,11 @@ Agent read_agent(BinaryReader& reader)
         .energy = reader.real(),
         .age = reader.unsigned_64(),
         .generation = reader.unsigned_64(),
+        .diet = static_cast<Diet>(reader.byte()),
+        .color = {.red = reader.real(), .green = reader.real(), .blue = reader.real()},
+        .mutation_rate = reader.real(),
+        .mutation_strength = reader.real(),
+        .prior_bite_damage = reader.real(),
     };
     for (double& parameter : agent.brain) {
         parameter = reader.real();
@@ -227,6 +287,7 @@ void save_checkpoint(const Simulation& simulation, std::ostream& output)
     writer.unsigned_64(snapshot.births);
     writer.unsigned_64(snapshot.introduced_agents);
     writer.unsigned_64(snapshot.deaths);
+    writer.unsigned_64(snapshot.agents_eaten);
 
     writer.unsigned_64(static_cast<std::uint64_t>(snapshot.agents.size()));
     for (const Agent& agent : snapshot.agents) {
@@ -238,6 +299,7 @@ void save_checkpoint(const Simulation& simulation, std::ostream& output)
         writer.unsigned_64(item.id);
         writer.real(item.position.x);
         writer.real(item.position.y);
+        writer.real(item.energy);
     }
 }
 
@@ -263,6 +325,7 @@ Simulation load_checkpoint(std::istream& input)
         .births = reader.unsigned_64(),
         .introduced_agents = reader.unsigned_64(),
         .deaths = reader.unsigned_64(),
+        .agents_eaten = reader.unsigned_64(),
     };
 
     const std::size_t agent_count = collection_size(reader.unsigned_64());
@@ -277,6 +340,7 @@ Simulation load_checkpoint(std::istream& input)
         snapshot.food.push_back(Food {
             .id = reader.unsigned_64(),
             .position = Vec2 {.x = reader.real(), .y = reader.real()},
+            .energy = reader.real(),
         });
     }
 

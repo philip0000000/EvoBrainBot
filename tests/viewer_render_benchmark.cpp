@@ -36,7 +36,7 @@ evobrain::viewer::RenderSnapshot make_snapshot(
         // while remaining exactly reproducible between benchmark runs.
         return static_cast<float>(
             std::fmod((static_cast<double>(index) + 0.5) * count, 1'000'003.0)
-            / 1'000'003.0);
+            / 1'000'003.0 * 2.5);
     };
     for (std::size_t index = 0; index < food_count; ++index) {
         snapshot.food.push_back({
@@ -203,6 +203,10 @@ int run_benchmark()
         .target_height = static_cast<int>(target_height),
     };
     evobrain::viewer::Camera camera;
+    camera.set_world_dimensions(2.5, 2.5, {
+        .width = static_cast<double>(target_width),
+        .height = static_cast<double>(target_height),
+    });
     camera.reset({
         .width = static_cast<double>(target_width),
         .height = static_cast<double>(target_height),
@@ -238,7 +242,7 @@ int run_benchmark()
     if (acceptance_fps != 0.0 && overlay_fps == 0.0) {
         std::cerr << "Agent-information scenario failed: " << error << '\n';
     } else if (overlay_fps != 0.0) {
-        std::cout << "50,000 agents + 50,000 food + energy bars (informational): "
+        std::cout << "50,000 agents + 50,000 food + information overlays (informational): "
                   << overlay_fps << " render-only FPS\n";
     }
 

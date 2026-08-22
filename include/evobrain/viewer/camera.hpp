@@ -20,13 +20,17 @@ struct WorldBounds {
     double maximum_y = 0.0;
 };
 
-// Controls a non-rotating 2D view bounded around the unit-square world.
+// Controls a non-rotating 2D view bounded around configurable world dimensions.
 class Camera {
 public:
     static constexpr double minimum_zoom = 0.5;
     static constexpr double maximum_zoom = 100.0;
-    static constexpr double outer_minimum = -0.5;
-    static constexpr double outer_maximum = 1.5;
+
+    // Applies positive world dimensions and resets when they change.
+    void set_world_dimensions(
+        double width,
+        double height,
+        const CameraViewport& viewport) noexcept;
 
     // Restores the centered 1x view and clamps it for the current viewport.
     void reset(const CameraViewport& viewport) noexcept;
@@ -47,7 +51,7 @@ public:
     // Reapplies camera limits after a viewport-size change.
     void viewport_changed(const CameraViewport& viewport) noexcept;
 
-    // Converts a point from unit-world coordinates to viewport pixels.
+    // Converts a point from world coordinates to viewport pixels.
     [[nodiscard]] Vec2 world_to_screen(
         Vec2 world,
         const CameraViewport& viewport) const noexcept;
@@ -68,15 +72,26 @@ public:
     // Returns the current magnification relative to the reset view.
     [[nodiscard]] double zoom() const noexcept;
 
+    // Returns the configured horizontal world extent.
+    [[nodiscard]] double world_width() const noexcept;
+
+    // Returns the configured vertical world extent.
+    [[nodiscard]] double world_height() const noexcept;
+
+    // Returns the camera-only boundary extending half a world on every side.
+    [[nodiscard]] WorldBounds outer_bounds() const noexcept;
+
 private:
     // Returns the shared pixels-per-world-unit scale for the viewport.
     [[nodiscard]] double scale(const CameraViewport& viewport) const noexcept;
 
-    // Keeps panning finite and within the two-world-unit outer boundary.
+    // Keeps panning finite and within the two-world-span outer boundary.
     void clamp_center(const CameraViewport& viewport) noexcept;
 
     Vec2 center_ {.x = 0.5, .y = 0.5};
     double zoom_ = 1.0;
+    double world_width_ = 1.0;
+    double world_height_ = 1.0;
 };
 
 } // namespace evobrain::viewer

@@ -3,45 +3,79 @@
 #include "evobrain/brain.hpp"
 #include "evobrain/random.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
 
 namespace evobrain {
 
-// Represents a continuous position or displacement in the unit-square world.
 struct Vec2 {
     double x = 0.0;
     double y = 0.0;
-
     bool operator==(const Vec2&) const = default;
 };
+
+enum class Diet : std::uint8_t { herbivore = 0, carnivore = 1 };
+
+// Stores an evolvable normalized RGB body color.
+struct AgentColor {
+    double red = 0.0;
+    double green = 0.0;
+    double blue = 0.0;
+    bool operator==(const AgentColor&) const = default;
+};
+
+inline constexpr AgentColor plant_food_color {.red = 0.10, .green = 0.55, .blue = 0.22};
 
 // Supplies explicit and provisional inputs for a reproducible simulation.
 struct SimulationConfig {
     std::uint64_t seed;
     std::uint64_t initial_population = 30;
     std::uint64_t minimum_population = 30;
-    std::uint64_t target_food_count = 100;
-    std::uint64_t food_population_threshold = 100;
+    std::uint64_t target_food_count = 500;
+    std::uint64_t food_population_threshold = 500;
+    std::uint64_t food_boost_population_threshold = 200;
+    std::uint64_t boosted_food_count = 1'000;
+    std::uint64_t maximum_new_food_per_tick = 5;
+    std::uint64_t food_regrowth_interval_ticks = 100;
+    std::uint64_t carnivore_introduction_interval_ticks = 500;
+    std::uint64_t carnivore_introduction_herbivore_threshold = 200;
+    std::uint64_t carnivore_introduction_ceiling = 30;
+    std::uint64_t carnivore_introduction_population_ceiling = 500;
+    std::uint64_t carnivore_introduction_batch = 15;
+    double world_width = 2.5;
+    double world_height = 2.5;
     double initial_energy = 0.5;
     double food_energy = 0.25;
+    double food_regrowth_amount = 0.025;
     double living_energy_cost = 0.001;
     double movement_energy_cost = 0.1;
     double reproduction_threshold = 1.0;
-    double eating_radius = 0.025;
     double maximum_movement_per_tick = 0.01;
     double maximum_turn_per_tick = 0.25;
+    double agent_radius = 0.010;
+    double food_radius = 0.005;
+    double eye_range = 0.250;
+    double eat_threshold = 0.50;
+    double eat_attempt_energy_cost = 0.001;
+    double bite_amount_per_tick = 0.05;
     double initial_brain_parameter_minimum = -1.0;
     double initial_brain_parameter_maximum = 1.0;
-    double mutation_strength = 0.1;
     double brain_parameter_minimum = -4.0;
     double brain_parameter_maximum = 4.0;
-
+    double founder_mutation_rate_minimum = 0.005;
+    double founder_mutation_rate_maximum = 0.020;
+    double founder_mutation_strength_minimum = 0.05;
+    double founder_mutation_strength_maximum = 0.20;
+    double brain_mutation_scale = 1.0;
+    double color_mutation_scale = 0.25;
+    double mutation_rate_mutation_scale = 0.02;
+    double mutation_strength_mutation_scale = 0.10;
     bool operator==(const SimulationConfig&) const = default;
 };
 
-// Stores the complete observable state of one living agent.
+// Stores the complete observable and inherited state of one living agent.
 struct Agent {
     std::uint64_t id = 0;
     Vec2 position;
@@ -49,33 +83,60 @@ struct Agent {
     double energy = 0.0;
     std::uint64_t age = 0;
     std::uint64_t generation = 0;
+    Diet diet = Diet::herbivore;
+    AgentColor color;
+    double mutation_rate = 0.01;
+    double mutation_strength = 0.1;
+    double prior_bite_damage = 0.0;
     BrainParameters brain {};
-
     bool operator==(const Agent&) const = default;
 };
 
-// Stores the complete observable state of one food item.
+// Stores one plant-food item's identity, position, and gradually consumed energy.
 struct Food {
     std::uint64_t id = 0;
     Vec2 position;
-
+    double energy = 0.0;
     bool operator==(const Food&) const = default;
 };
 
-// Summarizes current population state and accumulated lifecycle events.
 struct SimulationStats {
     std::uint64_t seed = 0;
     std::uint64_t completed_ticks = 0;
     std::uint64_t population = 0;
+    std::uint64_t herbivores = 0;
+    std::uint64_t carnivores = 0;
     std::uint64_t food = 0;
     std::uint64_t births = 0;
     std::uint64_t introduced_agents = 0;
     std::uint64_t deaths = 0;
-
+    std::uint64_t agents_eaten = 0;
     bool operator==(const SimulationStats&) const = default;
 };
 
-// Owns a detached, serializable copy of every deterministic state value.
+// Selects execution resources without changing deterministic simulation state.
+struct SimulationExecutionConfig {
+    // Zero automatically uses the available logical processors.
+    std::size_t thread_count = 0;
+};
+
+// Reports non-persisted work and timing measurements from the latest tick.
+struct SimulationDiagnostics {
+    std::size_t spatial_columns = 0;
+    std::size_t spatial_rows = 0;
+    std::size_t execution_threads = 1;
+    std::uint64_t vision_candidate_tests = 0;
+    std::uint64_t vision_brute_force_tests = 0;
+    std::uint64_t bite_candidate_tests = 0;
+    std::uint64_t bite_brute_force_tests = 0;
+    double spatial_index_milliseconds = 0.0;
+    double sensing_brain_milliseconds = 0.0;
+    double movement_milliseconds = 0.0;
+    double bite_milliseconds = 0.0;
+    double lifecycle_milliseconds = 0.0;
+    double total_milliseconds = 0.0;
+};
+
 struct SimulationSnapshot {
     SimulationConfig config;
     std::uint64_t current_tick = 0;
@@ -85,25 +146,27 @@ struct SimulationSnapshot {
     std::uint64_t births = 0;
     std::uint64_t introduced_agents = 0;
     std::uint64_t deaths = 0;
+    std::uint64_t agents_eaten = 0;
     std::vector<Agent> agents;
     std::vector<Food> food;
-
     bool operator==(const SimulationSnapshot&) const = default;
 };
 
-// Owns and advances the deterministic state of an EvoBrainBot simulation.
+// Owns and advances all deterministic state of one predator-prey simulation.
 class Simulation {
 public:
     // Creates a populated simulation at tick zero using validated configuration.
-    explicit Simulation(const SimulationConfig& config);
+    explicit Simulation(const SimulationConfig& config,
+        SimulationExecutionConfig execution = {});
 
     // Restores a simulation from a complete validated detached snapshot.
-    [[nodiscard]] static Simulation from_snapshot(SimulationSnapshot snapshot);
+    [[nodiscard]] static Simulation from_snapshot(SimulationSnapshot snapshot,
+        SimulationExecutionConfig execution = {});
 
     // Advances all simulation state by exactly one ordered fixed tick.
     void tick();
 
-    // Advances the simulation through the requested number of fixed ticks.
+    // Advances through the requested number of complete fixed ticks.
     void run_for(std::uint64_t ticks);
 
     // Returns the number of ticks completed by this simulation.
@@ -112,54 +175,85 @@ public:
     // Returns the immutable configuration, including the original seed.
     [[nodiscard]] const SimulationConfig& config() const noexcept;
 
-    // Returns a non-owning read-only view of the living agents.
+    // Returns a non-owning read-only view of all living agents.
     [[nodiscard]] std::span<const Agent> agents() const noexcept;
 
-    // Returns a non-owning read-only view of the current food items.
+    // Returns a non-owning read-only view of all remaining plant food.
     [[nodiscard]] std::span<const Food> food() const noexcept;
 
-    // Returns current counts together with accumulated lifecycle statistics.
+    // Returns current populations and accumulated lifecycle statistics.
     [[nodiscard]] SimulationStats stats() const noexcept;
 
-    // Returns a detached copy containing every value required for exact resume.
+    // Returns transient performance measurements excluded from checkpoints.
+    [[nodiscard]] const SimulationDiagnostics& diagnostics() const noexcept;
+
+    // Returns every deterministic value required to resume exactly.
     [[nodiscard]] SimulationSnapshot snapshot() const;
 
 private:
+    struct SpatialCell {
+        std::vector<std::size_t> agents;
+        std::vector<std::size_t> food;
+    };
     struct RestoredSnapshotTag { };
     struct AgentAction {
+        std::uint64_t agent_id = 0;
         double turn = 0.0;
-        double movement = 0.0;
+        double move = 0.0;
+        bool eat = false;
     };
-
     // Takes ownership of an already validated restored snapshot.
-    Simulation(SimulationSnapshot snapshot, RestoredSnapshotTag);
+    Simulation(SimulationSnapshot snapshot, RestoredSnapshotTag,
+        SimulationExecutionConfig execution);
 
-    // Creates one random generation-zero agent using the next stable ID.
-    [[nodiscard]] Agent create_random_agent();
+    // Configures fixed toroidal cells used only as a broad-phase acceleration index.
+    void configure_spatial_index();
 
-    // Creates one uniformly positioned food item using the next stable ID.
+    // Rebuilds transient cell membership from the current entity arrays.
+    void rebuild_spatial_index();
+
+    // Collects conservative broad-phase candidates around one toroidal point.
+    void collect_spatial_candidates(Vec2 center, double radius,
+        std::vector<std::size_t>& agent_indices,
+        std::vector<std::size_t>& food_indices) const;
+
+    // Creates one random generation-zero founder with an explicitly assigned diet.
+    [[nodiscard]] Agent create_random_agent(Diet diet);
+
+    // Creates one full-energy plant item using the next stable ID.
     [[nodiscard]] Food create_random_food();
 
-    // Evaluates actions against a shared start-of-tick world snapshot.
+    // Produces six first-hit ray readings and normalized internal sensors.
+    [[nodiscard]] BrainInputs sense_agent(const Agent& observer,
+        std::span<const std::size_t> agent_candidates,
+        std::span<const std::size_t> food_candidates) const;
+
+    // Evaluates all brains against the same completed previous state.
     [[nodiscard]] std::vector<AgentAction> evaluate_agent_actions();
 
-    // Applies actions, wrapping movement and charging age and energy costs.
+    // Applies movement and all attempt costs without resolving targets.
     void move_agents_and_charge_energy(std::span<const AgentAction> actions);
 
-    // Removes exhausted agents and records each death exactly once.
+    // Removes agents exhausted by living, movement, or attempt costs.
     void remove_dead_agents();
 
-    // Assigns each reachable food item to one deterministic living consumer.
-    void resolve_food_consumption();
+    // Selects mouth targets and applies all valid bite transfers together.
+    void resolve_bites(std::span<const AgentAction> actions);
 
     // Creates at most one inherited and mutated child per eligible parent.
     void reproduce_eligible_agents();
 
-    // Introduces random founders until the configured population floor is met.
+    // Introduces independent herbivore founders to restore the population floor.
     void restore_minimum_population();
 
-    // Restores target food only while population remains below its threshold.
+    // Introduces a bounded carnivore cohort on eligible periodic ticks.
+    void introduce_carnivores_if_supported();
+
+    // Adds a bounded number of plants toward the band ceiling without deleting excess.
     void replenish_food_if_allowed();
+
+    // Applies one global energy pulse to surviving food on configured ticks.
+    void regrow_food_if_due();
 
     SimulationConfig config_;
     std::uint64_t current_tick_ = 0;
@@ -169,8 +263,16 @@ private:
     std::uint64_t births_ = 0;
     std::uint64_t introduced_agents_ = 0;
     std::uint64_t deaths_ = 0;
+    std::uint64_t agents_eaten_ = 0;
     std::vector<Agent> agents_;
     std::vector<Food> food_;
+    std::size_t execution_thread_count_ = 1;
+    std::size_t spatial_columns_ = 1;
+    std::size_t spatial_rows_ = 1;
+    double spatial_cell_width_ = 1.0;
+    double spatial_cell_height_ = 1.0;
+    std::vector<SpatialCell> spatial_cells_;
+    SimulationDiagnostics diagnostics_;
 };
 
 } // namespace evobrain
