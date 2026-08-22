@@ -21,7 +21,6 @@ namespace {
 
 int failure_count = 0;
 
-// Records a failed boolean expectation while allowing later tests to run.
 void expect_true(const bool condition, const std::string_view description)
 {
     if (!condition) {
@@ -30,12 +29,9 @@ void expect_true(const bool condition, const std::string_view description)
     }
 }
 
-// Records a failed equality expectation without requiring streamable values.
 template <typename Actual, typename Expected>
-void expect_equal(
-    const Actual& actual,
-    const Expected& expected,
-    const std::string_view description)
+void expect_equal(const Actual& actual, const Expected& expected,
+                  const std::string_view description)
 {
     if (!(actual == expected)) {
         std::cerr << "FAILED: " << description << '\n';
@@ -43,12 +39,8 @@ void expect_equal(
     }
 }
 
-// Records a failed approximate floating-point equality expectation.
-void expect_near(
-    const double actual,
-    const double expected,
-    const double tolerance,
-    const std::string_view description)
+void expect_near(const double actual, const double expected, const double tolerance,
+                 const std::string_view description)
 {
     if (std::abs(actual - expected) > tolerance) {
         std::cerr << "FAILED: " << description << " (expected " << expected
@@ -57,11 +49,8 @@ void expect_near(
     }
 }
 
-// Records whether an operation rejects invalid input with invalid_argument.
 template <typename Operation>
-void expect_invalid_argument(
-    Operation&& operation,
-    const std::string_view description)
+void expect_invalid_argument(Operation&& operation, const std::string_view description)
 {
     try {
         std::forward<Operation>(operation)();
@@ -72,60 +61,66 @@ void expect_invalid_argument(
     }
 }
 
-// Returns a mechanics-focused configuration with no random initial entities.
 evobrain::SimulationConfig controlled_config(const std::uint64_t seed = 1)
 {
     evobrain::SimulationConfig config {.seed = seed};
     config.initial_population = 0;
     config.minimum_population = 0;
     config.target_food_count = 0;
-    config.food_population_threshold = 100;
-    config.initial_energy = 1.0;
-    config.food_energy = 0.5;
+    config.food_population_threshold = 0;
+    config.food_boost_population_threshold = 0;
+    config.boosted_food_count = 0;
+    config.world_width = 1.0;
+    config.world_height = 1.0;
+    config.carnivore_introduction_herbivore_threshold = 0;
+    config.carnivore_introduction_ceiling = 0;
+    config.carnivore_introduction_population_ceiling = 0;
+    config.carnivore_introduction_batch = 0;
+    config.initial_energy = 0.5;
     config.living_energy_cost = 0.0;
     config.movement_energy_cost = 0.0;
     config.reproduction_threshold = 10.0;
-    config.eating_radius = 0.0;
     config.maximum_movement_per_tick = 0.0;
     config.maximum_turn_per_tick = 0.0;
-    config.initial_brain_parameter_minimum = 0.0;
-    config.initial_brain_parameter_maximum = 0.0;
-    config.mutation_strength = 0.1;
-    config.brain_parameter_minimum = -4.0;
-    config.brain_parameter_maximum = 4.0;
+    config.eat_attempt_energy_cost = 0.0;
     return config;
 }
 
-// Creates a controlled agent and overrides the zero brain's half-speed movement.
-evobrain::Agent controlled_agent(
-    const std::uint64_t id,
-    const evobrain::Vec2 position,
-    const double direction,
-    const double energy,
-    const std::uint64_t generation = 0)
+// Creates a stationary test brain with explicit bounded output biases.
+evobrain::BrainParameters action_brain(
+    const double turn = 0.0, const double move = -1.0, const double eat = -1.0)
 {
-    evobrain::Agent agent {
-        .id = id,
-        .position = position,
-        .direction = direction,
-        .energy = energy,
-        .generation = generation,
-    };
-    // A movement bias of -1 maps to zero movement after activation.
-    agent.brain[evobrain::brain_parameter_count - 1] = -1.0;
-    return agent;
+    evobrain::BrainParameters brain {};
+    brain[evobrain::output_bias_offset] = turn;
+    brain[evobrain::output_bias_offset + 1] = move;
+    brain[evobrain::output_bias_offset + 2] = eat;
+    return brain;
 }
 
-// Replaces random initialization with an explicit validated test snapshot.
+evobrain::Agent controlled_agent(
+    const std::uint64_t id, const evobrain::Vec2 position, const double direction,
+    const double energy, const evobrain::Diet diet = evobrain::Diet::herbivore)
+{
+    return {.id = id, .position = position, .direction = direction, .energy = energy,
+        .diet = diet, .color = {.red = 0.2, .green = 0.3, .blue = 0.4},
+        .mutation_rate = 0.01, .mutation_strength = 0.1,
+        .brain = action_brain()};
+}
+
 evobrain::Simulation controlled_simulation(
-    const evobrain::SimulationConfig& config,
-    std::vector<evobrain::Agent> agents,
+    const evobrain::SimulationConfig& config, std::vector<evobrain::Agent> agents,
     std::vector<evobrain::Food> food)
 {
     evobrain::Simulation initial(config);
     evobrain::SimulationSnapshot snapshot = initial.snapshot();
     snapshot.agents = std::move(agents);
     snapshot.food = std::move(food);
+    snapshot.config.target_food_count = std::max(
+        snapshot.config.target_food_count,
+        static_cast<std::uint64_t>(snapshot.food.size()));
+    snapshot.config.boosted_food_count = std::max(
+        snapshot.config.boosted_food_count,
+        static_cast<std::uint64_t>(snapshot.food.size()));
     snapshot.next_agent_id = 1;
     for (const evobrain::Agent& agent : snapshot.agents) {
         snapshot.next_agent_id = std::max(snapshot.next_agent_id, agent.id + 1);
@@ -137,567 +132,464 @@ evobrain::Simulation controlled_simulation(
     return evobrain::Simulation::from_snapshot(std::move(snapshot));
 }
 
-// Returns the agent with the requested stable ID from a read-only state view.
-const evobrain::Agent& agent_with_id(
-    const evobrain::Simulation& simulation,
-    const std::uint64_t id)
+const evobrain::Agent& agent_with_id(const evobrain::Simulation& simulation,
+                                    const std::uint64_t id)
 {
-    const auto found = std::ranges::find(
-        simulation.agents(), id, &evobrain::Agent::id);
-    if (found == simulation.agents().end()) {
-        throw std::logic_error("expected test agent was not found");
-    }
+    const auto found = std::ranges::find(simulation.agents(), id, &evobrain::Agent::id);
+    if (found == simulation.agents().end()) throw std::logic_error("test agent missing");
     return *found;
 }
 
-// Verifies fixed-step tick accounting through the public simulation API.
-void test_simulation_ticks()
+void test_random_and_fixed_tick_determinism()
 {
-    evobrain::Simulation simulation(evobrain::SimulationConfig {.seed = 1234});
-    expect_equal(simulation.current_tick(), std::uint64_t {0},
-        "new simulation starts at zero");
-
-    simulation.tick();
-    expect_equal(simulation.current_tick(), std::uint64_t {1},
-        "tick advances exactly once");
-
-    simulation.tick();
-    simulation.tick();
-    expect_equal(simulation.current_tick(), std::uint64_t {3},
-        "multiple ticks accumulate");
-
-    simulation.run_for(7);
-    expect_equal(simulation.current_tick(), std::uint64_t {10},
-        "run_for advances by n ticks");
-
-    simulation.run_for(0);
-    expect_equal(simulation.current_tick(), std::uint64_t {10},
-        "run_for zero changes nothing");
-}
-
-// Verifies run_for has the same complete state as repeated individual ticks.
-void test_run_for_equivalence()
-{
-    evobrain::Simulation run_simulation(evobrain::SimulationConfig {.seed = 9});
-    evobrain::Simulation tick_simulation(evobrain::SimulationConfig {.seed = 9});
-
-    run_simulation.run_for(25);
-    for (std::uint64_t index = 0; index < 25; ++index) {
-        tick_simulation.tick();
-    }
-
-    expect_equal(run_simulation.snapshot(), tick_simulation.snapshot(),
-        "run_for matches repeated tick state");
-}
-
-// Verifies seeds reproducibly select deterministic PCG32 sequences.
-void test_seed_behavior()
-{
-    evobrain::Pcg32 first(500);
-    evobrain::Pcg32 second(500);
-    evobrain::Pcg32 different(501);
-    bool found_difference = false;
-
-    for (std::size_t index = 0; index < 16; ++index) {
-        const std::uint32_t first_value = first.next();
-        expect_equal(first_value, second.next(), "equal seeds match");
-        if (first_value != different.next()) {
-            found_difference = true;
-        }
-    }
-
-    expect_true(found_difference, "different seeds select different sequences");
-}
-
-// Locks the documented initialization and PCG-XSH-RR output to known values.
-void test_known_pcg32_sequence()
-{
-    constexpr std::array<std::uint32_t, 6> expected {
-        3270867926U,
-        1795671209U,
-        1924641435U,
-        1143034755U,
-        4121910957U,
-        1757328946U,
-    };
-
+    constexpr std::array<std::uint32_t, 3> known {3270867926U, 1795671209U, 1924641435U};
     evobrain::Pcg32 random(42);
-    for (const std::uint32_t expected_value : expected) {
-        expect_equal(random.next(), expected_value, "seed 42 PCG32 sequence");
-    }
+    for (const std::uint32_t value : known) expect_equal(random.next(), value, "known PCG value");
+
+    evobrain::Simulation run(evobrain::SimulationConfig {.seed = 9});
+    evobrain::Simulation steps(evobrain::SimulationConfig {.seed = 9});
+    run.run_for(10);
+    for (int index = 0; index < 10; ++index) steps.tick();
+    expect_equal(run.snapshot(), steps.snapshot(), "run_for and repeated ticks match");
 }
 
-// Verifies deterministic real sampling and exact PRNG-state restoration.
-void test_random_sampling_and_restore()
+void test_spatial_index_and_thread_determinism()
 {
-    evobrain::Pcg32 first(77);
-    const double first_sample = first.unit_interval();
-    expect_true(first_sample >= 0.0 && first_sample < 1.0,
-        "unit sample is in its half-open range");
-
-    const std::uint64_t saved_state = first.state();
-    evobrain::Pcg32 restored = evobrain::Pcg32::from_state(saved_state);
-    expect_equal(first.next(), restored.next(), "restored random state resumes exactly");
-
-    for (std::size_t index = 0; index < 32; ++index) {
-        expect_true(first.bounded(10) < 10, "bounded random value stays in range");
-    }
+    const evobrain::SimulationConfig config {.seed = 2026};
+    evobrain::Simulation serial(config,
+        evobrain::SimulationExecutionConfig {.thread_count = 1});
+    evobrain::Simulation automatic(config);
+    serial.run_for(1'000);
+    automatic.run_for(1'000);
+    expect_equal(serial.snapshot(), automatic.snapshot(),
+        "single-thread and automatic execution produce identical state");
+    expect_true(automatic.diagnostics().spatial_columns > 1
+            && automatic.diagnostics().spatial_rows > 1,
+        "spatial broad phase divides the world into multiple cells");
+    expect_true(automatic.diagnostics().vision_candidate_tests
+            < automatic.diagnostics().vision_brute_force_tests,
+        "spatial broad phase reduces vision candidate tests");
 }
 
-// Verifies the direct brain's parameter layout and clamped output ranges.
-void test_brain_evaluation()
+void test_brain_topology_and_ranges()
 {
-    evobrain::BrainParameters parameters {};
-    parameters[0] = 2.0;
-    parameters[4] = 0.25;
-    parameters[7] = -3.0;
-    parameters[9] = 1.0;
-    const evobrain::BrainOutputs outputs = evobrain::evaluate_brain(
-        parameters,
-        evobrain::BrainInputs {
-            .food_direction_sine = 0.5,
-            .food_distance = 1.0,
-        });
-
-    expect_equal(outputs.turn, 1.0, "turn output clamps to positive one");
-    expect_equal(outputs.movement, 0.0, "movement output maps negative clamp to zero");
+    expect_equal(evobrain::brain_parameter_count, std::size_t {243},
+        "26-to-8-to-3 brain has 243 parameters");
+    evobrain::BrainParameters brain {};
+    brain[evobrain::hidden_bias_offset] = 1.0;
+    brain[evobrain::hidden_output_weight_offset] = 2.0;
+    brain[evobrain::hidden_output_weight_offset + evobrain::brain_hidden_count] = -2.0;
+    brain[evobrain::hidden_output_weight_offset + 2 * evobrain::brain_hidden_count] = 2.0;
+    const evobrain::BrainOutputs output = evobrain::evaluate_brain(brain, {});
+    expect_equal(output.turn, 1.0, "turn clamps to one");
+    expect_equal(output.move, 0.0, "Move maps negative clamp to zero");
+    expect_equal(output.eat, 1.0, "eat maps positive clamp to one");
 }
 
-// Verifies configuration validation rejects unsafe mechanical relationships.
-void test_configuration_validation()
+void test_configuration_and_founders()
 {
-    evobrain::SimulationConfig below_minimum {.seed = 1};
-    below_minimum.initial_population = 1;
-    below_minimum.minimum_population = 2;
-    expect_invalid_argument(
-        [&below_minimum] { evobrain::Simulation simulation(below_minimum); },
-        "initial population below minimum is rejected");
+    evobrain::SimulationConfig invalid {.seed = 1};
+    invalid.eye_range = 0.0;
+    expect_invalid_argument([&] { evobrain::Simulation simulation(invalid); },
+        "zero eye range is rejected");
 
-    evobrain::SimulationConfig invalid_energy {.seed = 1};
-    invalid_energy.initial_energy = 0.0;
-    expect_invalid_argument(
-        [&invalid_energy] { evobrain::Simulation simulation(invalid_energy); },
-        "nonpositive initial energy is rejected");
-
-    evobrain::SimulationConfig invalid_mutation {.seed = 1};
-    invalid_mutation.mutation_strength = 0.0;
-    expect_invalid_argument(
-        [&invalid_mutation] {
-            evobrain::Simulation simulation(invalid_mutation);
-        },
-        "zero mutation strength is rejected");
-
-    evobrain::SimulationConfig overflowing_mutation {.seed = 1};
-    overflowing_mutation.mutation_strength =
-        std::numeric_limits<double>::max();
-    expect_invalid_argument(
-        [&overflowing_mutation] {
-            evobrain::Simulation simulation(overflowing_mutation);
-        },
-        "overflowing mutation range is rejected");
-
-    evobrain::SimulationConfig overflowing_initial_range {.seed = 1};
-    overflowing_initial_range.initial_brain_parameter_minimum =
-        -std::numeric_limits<double>::max();
-    overflowing_initial_range.initial_brain_parameter_maximum =
-        std::numeric_limits<double>::max();
-    overflowing_initial_range.brain_parameter_minimum =
-        -std::numeric_limits<double>::max();
-    overflowing_initial_range.brain_parameter_maximum =
-        std::numeric_limits<double>::max();
-    expect_invalid_argument(
-        [&overflowing_initial_range] {
-            evobrain::Simulation simulation(overflowing_initial_range);
-        },
-        "overflowing initial brain range is rejected");
-
-    evobrain::SimulationConfig invalid_brain_range {.seed = 1};
-    invalid_brain_range.initial_brain_parameter_maximum = 5.0;
-    expect_invalid_argument(
-        [&invalid_brain_range] {
-            evobrain::Simulation simulation(invalid_brain_range);
-        },
-        "initial brain range outside limits is rejected");
-}
-
-// Verifies seeded initialization creates valid, reproducible world entities.
-void test_initialization_and_seeded_state()
-{
     evobrain::Simulation first(evobrain::SimulationConfig {.seed = 123});
     evobrain::Simulation second(evobrain::SimulationConfig {.seed = 123});
-    evobrain::Simulation different(evobrain::SimulationConfig {.seed = 124});
-
-    expect_equal(first.snapshot(), second.snapshot(),
-        "equal seed and configuration initialize equal state");
-    expect_true(!(first.snapshot() == different.snapshot()),
-        "different seeds initialize different state");
-    expect_equal(first.agents().size(), std::size_t {30},
-        "default initial population is created");
-    expect_equal(first.food().size(), std::size_t {100},
-        "default target food is created");
-    expect_equal(first.stats().births, std::uint64_t {0},
-        "initial agents are not reproduction births");
-    expect_equal(first.stats().introduced_agents, std::uint64_t {0},
-        "initial agents are not later introductions");
+    expect_equal(first.snapshot(), second.snapshot(), "founders are seed reproducible");
+    expect_true(first.config().world_width == 2.5 && first.config().world_height == 2.5,
+        "default world uses the configured 2.5 by 2.5 dimensions");
+    expect_true(first.config().food_boost_population_threshold == 200
+            && first.config().boosted_food_count == 1'000
+            && first.config().food_population_threshold == 500
+            && first.config().target_food_count == 500
+            && first.config().maximum_new_food_per_tick == 5,
+        "default population bands configure 1000, 500, then no spawning");
+    expect_true(first.config().carnivore_introduction_interval_ticks == 500
+            && first.config().carnivore_introduction_herbivore_threshold == 200
+            && first.config().carnivore_introduction_ceiling == 30
+            && first.config().carnivore_introduction_population_ceiling == 500
+            && first.config().carnivore_introduction_batch == 15,
+        "default carnivore introduction rule matches the ecological thresholds");
+    expect_equal(first.food().size(), std::size_t {1'000},
+        "new simulation starts with its complete initial food supply");
+    expect_true(std::ranges::any_of(first.food(), [](const evobrain::Food& item) {
+        return item.position.x > 1.0 || item.position.y > 1.0;
+    }), "random food placement uses space beyond the former unit world");
+    for (const evobrain::Agent& agent : first.agents()) {
+        expect_true(agent.color.red >= 0.0 && agent.color.red <= 1.0
+                && agent.color.green >= 0.0 && agent.color.green <= 1.0
+                && agent.color.blue >= 0.0 && agent.color.blue <= 1.0,
+            "founder RGB is normalized");
+        expect_true(agent.mutation_rate >= first.config().founder_mutation_rate_minimum
+                && agent.mutation_rate <= first.config().founder_mutation_rate_maximum,
+            "founder mutation rate uses founder range");
+        expect_true(agent.mutation_strength >= first.config().founder_mutation_strength_minimum
+                && agent.mutation_strength <= first.config().founder_mutation_strength_maximum,
+            "founder mutation strength uses founder range");
+        expect_true(agent.diet == evobrain::Diet::herbivore,
+            "ordinary random founders are herbivores");
+        expect_true(agent.position.x >= 0.0 && agent.position.x < first.config().world_width
+                && agent.position.y >= 0.0
+                && agent.position.y < first.config().world_height,
+            "founders use the complete configured world bounds");
+    }
+    expect_equal(first.stats().herbivores + first.stats().carnivores,
+        first.stats().population, "diet counts sum to population");
 }
 
-// Verifies movement uses clamped output and wraps across the world boundary.
-void test_movement_and_wraparound()
+void test_literal_ray_first_hit_and_wrap()
 {
     evobrain::SimulationConfig config = controlled_config();
-    config.maximum_movement_per_tick = 0.01;
-    evobrain::Agent agent = controlled_agent(1, {.x = 0.995, .y = 0.5}, 0.0, 1.0);
-    agent.brain[evobrain::brain_parameter_count - 1] = 1.0;
-    evobrain::Simulation simulation = controlled_simulation(config, {agent}, {});
-
-    simulation.tick();
-
-    expect_near(simulation.agents()[0].position.x, 0.005, 1e-12,
-        "movement wraps at the right boundary");
-    expect_near(simulation.agents()[0].position.y, 0.5, 1e-12,
-        "horizontal movement preserves y");
-}
-
-// Verifies turn and movement scaling together with both per-tick energy costs.
-void test_turning_movement_and_energy_costs()
-{
-    evobrain::SimulationConfig config = controlled_config();
-    config.maximum_movement_per_tick = 0.01;
+    config.world_width = 2.5;
+    config.world_height = 2.5;
     config.maximum_turn_per_tick = 0.25;
-    config.living_energy_cost = 0.2;
-    config.movement_energy_cost = 0.5;
-    evobrain::Agent agent =
-        controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 1.0);
-    agent.brain[evobrain::parameters_per_brain_output - 1] = 1.0;
-    agent.brain[evobrain::brain_parameter_count - 1] = 1.0;
-    evobrain::Simulation simulation = controlled_simulation(config, {agent}, {});
+    evobrain::Agent observer = controlled_agent(1, {.x = 2.49, .y = 0.5}, 0.0, 1.0);
+    // Route the left eye's forward red channel through hidden zero to Turn.
+    observer.brain = action_brain();
+    observer.brain[8] = 1.0;
+    observer.brain[evobrain::hidden_output_weight_offset] = 1.0;
+    evobrain::Agent near = controlled_agent(2, {.x = 0.03, .y = 0.505}, 0.0, 1.0);
+    near.color = {.red = 1.0, .green = 0.0, .blue = 0.0};
+    evobrain::Simulation visible = controlled_simulation(config, {observer, near}, {});
+    visible.tick();
+    expect_near(agent_with_id(visible, 1).direction, 0.25, 1e-12,
+        "finite ray sees a circle across toroidal boundary");
 
-    simulation.tick();
-
-    const evobrain::Agent& moved = simulation.agents().front();
-    expect_near(moved.direction, 0.25, 1e-12,
-        "maximum positive turn output uses the configured turn limit");
-    expect_near(moved.position.x, 0.5 + std::cos(0.25) * 0.01, 1e-12,
-        "maximum movement output uses the configured movement limit");
-    expect_near(moved.position.y, 0.5 + std::sin(0.25) * 0.01, 1e-12,
-        "movement follows the updated direction");
-    expect_near(moved.energy, 0.795, 1e-12,
-        "living and distance-proportional movement costs are both charged");
+    near.position.x = 0.30;
+    evobrain::Simulation out_of_range = controlled_simulation(config, {observer, near}, {});
+    out_of_range.tick();
+    expect_near(agent_with_id(out_of_range, 1).direction, 0.0, 1e-12,
+        "ray does not autocomplete beyond configured range");
 }
 
-// Verifies food sensing uses shortest wraparound direction across an edge.
-void test_nearest_food_wraparound_sensing()
+void test_configured_world_movement_wrap()
+{
+    evobrain::SimulationConfig config = controlled_config();
+    config.world_width = 2.5;
+    config.world_height = 2.5;
+    config.maximum_movement_per_tick = 0.01;
+    evobrain::Agent mover = controlled_agent(1, {.x = 2.495, .y = 1.25}, 0.0, 1.0);
+    mover.brain = action_brain(0.0, 1.0, -1.0);
+    evobrain::Simulation simulation = controlled_simulation(config, {mover}, {});
+    simulation.tick();
+    expect_near(simulation.agents().front().position.x, 0.005, 1e-12,
+        "movement wraps at the configured horizontal world extent");
+}
+
+void test_gradual_diet_specific_eating()
+{
+    evobrain::SimulationConfig config = controlled_config();
+    evobrain::Agent herbivore = controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 0.25);
+    herbivore.brain = action_brain(0.0, -1.0, 1.0);
+    evobrain::Simulation simulation = controlled_simulation(config, {herbivore},
+        {{.id = 1, .position = {.x = 0.51, .y = 0.5}, .energy = 0.12}});
+    simulation.tick();
+    expect_near(simulation.agents().front().energy, 0.30, 1e-12,
+        "herbivore receives one configured bite");
+    expect_near(simulation.food().front().energy, 0.07, 1e-12,
+        "food loses energy gradually");
+
+    evobrain::Agent carnivore = herbivore;
+    carnivore.diet = evobrain::Diet::carnivore;
+    evobrain::Simulation wrong_food = controlled_simulation(config, {carnivore},
+        {{.id = 1, .position = {.x = 0.51, .y = 0.5}, .energy = 0.12}});
+    wrong_food.tick();
+    expect_near(wrong_food.agents().front().energy, 0.25, 1e-12,
+        "carnivore gains nothing from plant food");
+    expect_near(wrong_food.food().front().energy, 0.12, 1e-12,
+        "wrong-diet plant remains unchanged");
+
+    evobrain::Agent blocking_agent = controlled_agent(
+        2, {.x = 0.51, .y = 0.5}, 0.0, 0.5, evobrain::Diet::carnivore);
+    evobrain::Simulation blocked = controlled_simulation(config,
+        {herbivore, blocking_agent},
+        {{.id = 1, .position = {.x = 0.51, .y = 0.5}, .energy = 0.12}});
+    blocked.tick();
+    expect_near(agent_with_id(blocked, 1).energy, 0.25, 1e-12,
+        "topmost wrong-diet agent blocks food below it");
+    expect_near(blocked.food().front().energy, 0.12, 1e-12,
+        "blocked food is not searched as an alternate target");
+}
+
+void test_mutual_and_proportional_agent_bites()
+{
+    evobrain::SimulationConfig config = controlled_config();
+    evobrain::Agent left = controlled_agent(1, {.x = 0.50, .y = 0.5}, 0.0, 0.20,
+        evobrain::Diet::carnivore);
+    evobrain::Agent right = controlled_agent(2, {.x = 0.518, .y = 0.5},
+        std::numbers::pi_v<double>, 0.20, evobrain::Diet::carnivore);
+    left.brain = right.brain = action_brain(0.0, -1.0, 1.0);
+    evobrain::Simulation mutual = controlled_simulation(config, {left, right}, {});
+    mutual.tick();
+    expect_near(agent_with_id(mutual, 1).energy, 0.20, 1e-12,
+        "first mutual biter loses and gains simultaneously");
+    expect_near(agent_with_id(mutual, 2).energy, 0.20, 1e-12,
+        "second mutual biter loses and gains simultaneously");
+    expect_near(agent_with_id(mutual, 1).prior_bite_damage, 0.05, 1e-12,
+        "bite damage is stored for next tick");
+
+    evobrain::Agent attacker1 = left;
+    evobrain::Agent attacker2 = left;
+    attacker2.id = 2;
+    evobrain::Agent target = controlled_agent(3, {.x = 0.51, .y = 0.5}, 0.0, 0.05,
+        evobrain::Diet::herbivore);
+    target.brain = action_brain();
+    evobrain::Simulation shared = controlled_simulation(config,
+        {attacker1, attacker2, target}, {});
+    shared.tick();
+    expect_true(agent_with_id(shared, 1).energy == 0.225
+            && agent_with_id(shared, 2).energy == 0.225,
+        "insufficient target energy is allocated proportionally");
+    expect_true(std::ranges::find(shared.agents(), std::uint64_t {3}, &evobrain::Agent::id)
+            == shared.agents().end(), "depleted target is removed");
+    expect_equal(shared.stats().agents_eaten, std::uint64_t {1},
+        "agent killed through eating is counted");
+}
+
+void test_inherited_mutation_and_reproduction_geometry()
+{
+    evobrain::SimulationConfig config = controlled_config(77);
+    config.reproduction_threshold = 1.0;
+    evobrain::Agent parent = controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 1.2,
+        evobrain::Diet::carnivore);
+    parent.color = {.red = 0.5, .green = 0.5, .blue = 0.5};
+    parent.mutation_rate = 1.0;
+    parent.mutation_strength = 0.1;
+    evobrain::Simulation simulation = controlled_simulation(config, {parent}, {});
+    simulation.tick();
+    const evobrain::Agent& child = agent_with_id(simulation, 2);
+    expect_equal(child.diet, evobrain::Diet::carnivore, "diet is copied without mutation");
+    expect_near(child.position.x, 0.48, 1e-12, "child is placed two radii behind parent");
+    expect_near(child.direction, std::numbers::pi_v<double>, 1e-12,
+        "child faces opposite parent");
+    expect_equal(child.age, std::uint64_t {0}, "new child has age zero");
+    expect_near(child.prior_bite_damage, 0.0, 0.0, "new child damage starts clear");
+    expect_true(std::abs(child.color.red - parent.color.red) <= 0.025
+            && std::abs(child.mutation_rate - parent.mutation_rate) <= 0.002
+            && std::abs(child.mutation_strength - parent.mutation_strength) <= 0.01,
+        "category mutation scales bound inherited DNA changes");
+}
+
+void test_population_food_boost_and_natural_excess_reduction()
+{
+    evobrain::SimulationConfig low = controlled_config();
+    low.initial_population = 39;
+    low.target_food_count = 3;
+    low.food_population_threshold = 100;
+    low.food_boost_population_threshold = 40;
+    low.boosted_food_count = 6;
+    evobrain::Simulation low_population(low);
+    expect_equal(low_population.food().size(), std::size_t {6},
+        "population below boost threshold starts with boosted food count");
+
+    evobrain::SimulationConfig normal = low;
+    normal.initial_population = 40;
+    evobrain::Simulation normal_population(normal);
+    expect_equal(normal_population.food().size(), std::size_t {3},
+        "population at boost threshold uses normal food count");
+
+    evobrain::SimulationConfig crowded = low;
+    crowded.initial_population = 3;
+    crowded.food_boost_population_threshold = 2;
+    crowded.food_population_threshold = 3;
+    evobrain::Simulation crowded_population(crowded);
+    evobrain::SimulationSnapshot crowded_snapshot = crowded_population.snapshot();
+    for (evobrain::Agent& agent : crowded_snapshot.agents) {
+        agent.brain = action_brain();
+    }
+    crowded_snapshot.food.clear();
+    evobrain::Simulation no_replenishment =
+        evobrain::Simulation::from_snapshot(std::move(crowded_snapshot));
+    no_replenishment.tick();
+    expect_true(no_replenishment.food().empty(),
+        "population at replenishment threshold receives no replacement food");
+
+    evobrain::SimulationSnapshot excess = normal_population.snapshot();
+    for (evobrain::Agent& agent : excess.agents) {
+        agent.brain = action_brain();
+    }
+    excess.food = {
+        {.id = 1, .position = {.x = 0.1, .y = 0.1}, .energy = 0.25},
+        {.id = 2, .position = {.x = 0.2, .y = 0.1}, .energy = 0.25},
+        {.id = 3, .position = {.x = 0.3, .y = 0.1}, .energy = 0.25},
+        {.id = 4, .position = {.x = 0.4, .y = 0.1}, .energy = 0.25},
+        {.id = 5, .position = {.x = 0.5, .y = 0.1}, .energy = 0.25},
+        {.id = 6, .position = {.x = 0.6, .y = 0.1}, .energy = 0.25},
+    };
+    excess.next_food_id = 7;
+    evobrain::Simulation recovered =
+        evobrain::Simulation::from_snapshot(std::move(excess));
+    recovered.tick();
+    expect_equal(recovered.food().size(), std::size_t {6},
+        "food above normal target is not deleted after population recovery");
+}
+
+void test_global_food_regrowth_pulse()
 {
     evobrain::SimulationConfig config = controlled_config();
     config.target_food_count = 2;
-    config.food_population_threshold = 0;
-    config.maximum_turn_per_tick = 0.25;
-    evobrain::Agent agent = controlled_agent(1, {.x = 0.99, .y = 0.5}, 0.0, 1.0);
-    agent.brain[1] = 2.0;
-    evobrain::Simulation simulation = controlled_simulation(
-        config,
-        {agent},
+    config.food_population_threshold = 100;
+    config.food_boost_population_threshold = 0;
+    config.boosted_food_count = 2;
+    config.food_regrowth_interval_ticks = 100;
+    config.food_regrowth_amount = 0.025;
+
+    evobrain::Agent idle = controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 1.0);
+    evobrain::Simulation before_pulse = controlled_simulation(config, {idle},
         {
-            {.id = 1, .position = {.x = 0.99, .y = 0.6}},
-            {.id = 2, .position = {.x = 0.01, .y = 0.5}},
+            {.id = 1, .position = {.x = 0.8, .y = 0.8}, .energy = 0.20},
+            {.id = 2, .position = {.x = 0.7, .y = 0.8}, .energy = 0.25},
         });
+    evobrain::SimulationSnapshot pulse_snapshot = before_pulse.snapshot();
+    pulse_snapshot.current_tick = 99;
+    evobrain::Simulation pulse =
+        evobrain::Simulation::from_snapshot(std::move(pulse_snapshot));
+    pulse.tick();
+    expect_near(pulse.food().front().energy, 0.225, 1e-12,
+        "surviving food gains energy on global tick 100 pulse");
+    expect_near(pulse.food()[1].energy, 0.25, 1e-12,
+        "food at maximum energy remains clamped on a regrowth pulse");
 
-    simulation.tick();
-
-    expect_near(simulation.agents()[0].direction, 0.25, 1e-12,
-        "nearest food across an edge is sensed instead of a lower-ID item");
-
-    evobrain::Agent tie_agent =
-        controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 1.0);
-    tie_agent.brain[0] = 2.0;
-    evobrain::Simulation tie_simulation = controlled_simulation(
-        config,
-        {tie_agent},
+    evobrain::Agent eater = idle;
+    eater.brain = action_brain(0.0, -1.0, 1.0);
+    evobrain::Simulation bitten_before_pulse = controlled_simulation(config, {eater},
         {
-            {.id = 2, .position = {.x = 0.5, .y = 0.6}},
-            {.id = 1, .position = {.x = 0.5, .y = 0.4}},
+            {.id = 1, .position = {.x = 0.51, .y = 0.5}, .energy = 0.25},
+            {.id = 2, .position = {.x = 0.8, .y = 0.8}, .energy = 0.25},
         });
-
-    tie_simulation.tick();
-
-    expect_near(tie_simulation.agents()[0].direction,
-        2.0 * std::numbers::pi_v<double> - 0.25, 1e-12,
-        "lowest food ID wins an exact sensing-distance tie");
+    evobrain::SimulationSnapshot bitten_snapshot = bitten_before_pulse.snapshot();
+    bitten_snapshot.current_tick = 99;
+    evobrain::Simulation bitten =
+        evobrain::Simulation::from_snapshot(std::move(bitten_snapshot));
+    bitten.tick();
+    expect_near(bitten.food().front().energy, 0.225, 1e-12,
+        "food bitten on a pulse tick regrows after the bite");
 }
 
-// Verifies the no-food sensor supplies zero direction and maximum distance.
-void test_no_food_sensor_values()
-{
-    evobrain::SimulationConfig config = controlled_config();
-    config.maximum_turn_per_tick = 0.25;
-    evobrain::Agent distance_agent =
-        controlled_agent(1, {.x = 0.3, .y = 0.5}, 0.0, 1.0);
-    distance_agent.brain[2] = 1.0;
-    evobrain::Agent sine_agent =
-        controlled_agent(2, {.x = 0.5, .y = 0.5}, 0.0, 1.0);
-    sine_agent.brain[0] = 1.0;
-    evobrain::Agent cosine_agent =
-        controlled_agent(3, {.x = 0.7, .y = 0.5}, 0.0, 1.0);
-    cosine_agent.brain[1] = 1.0;
-    evobrain::Simulation simulation = controlled_simulation(
-        config, {distance_agent, sine_agent, cosine_agent}, {});
-
-    simulation.tick();
-
-    expect_near(agent_with_id(simulation, 1).direction, 0.25, 1e-12,
-        "no food supplies normalized distance one");
-    expect_near(agent_with_id(simulation, 2).direction, 0.0, 1e-12,
-        "no food supplies relative-direction sine zero");
-    expect_near(agent_with_id(simulation, 3).direction, 0.0, 1e-12,
-        "no food supplies relative-direction cosine zero");
-}
-
-// Verifies exhausted agents die before coincident food can be consumed.
-void test_death_before_eating()
-{
-    evobrain::SimulationConfig config = controlled_config();
-    config.target_food_count = 1;
-    config.food_population_threshold = 0;
-    config.living_energy_cost = 1.0;
-    config.eating_radius = 0.1;
-    evobrain::Simulation simulation = controlled_simulation(
-        config,
-        {controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 0.5)},
-        {{.id = 1, .position = {.x = 0.5, .y = 0.5}}});
-
-    simulation.tick();
-
-    expect_true(simulation.agents().empty(), "exhausted agent is removed");
-    expect_equal(simulation.food().size(), std::size_t {1},
-        "dead agent cannot consume food");
-    expect_equal(simulation.stats().deaths, std::uint64_t {1},
-        "death is counted once");
-}
-
-// Verifies eating awards energy to the nearest stable-ID winner only once.
-void test_food_consumption_and_contention()
-{
-    evobrain::SimulationConfig config = controlled_config();
-    config.target_food_count = 1;
-    config.food_population_threshold = 0;
-    config.eating_radius = 0.1;
-    config.food_energy = 0.5;
-    evobrain::Simulation simulation = controlled_simulation(
-        config,
-        {
-            controlled_agent(2, {.x = 0.5, .y = 0.5}, 0.0, 0.25),
-            controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 0.25),
-        },
-        {{.id = 1, .position = {.x = 0.5, .y = 0.5}}});
-
-    simulation.tick();
-
-    expect_true(simulation.food().empty(), "consumed food is removed");
-    expect_equal(agent_with_id(simulation, 1).energy, 0.75,
-        "lower stable ID wins exact food tie");
-    expect_equal(agent_with_id(simulation, 2).energy, 0.25,
-        "losing agent receives no food energy");
-
-    evobrain::Simulation nearest_simulation = controlled_simulation(
-        config,
-        {
-            controlled_agent(1, {.x = 0.6, .y = 0.5}, 0.0, 0.25),
-            controlled_agent(2, {.x = 0.51, .y = 0.5}, 0.0, 0.25),
-        },
-        {{.id = 1, .position = {.x = 0.5, .y = 0.5}}});
-
-    nearest_simulation.tick();
-
-    expect_equal(agent_with_id(nearest_simulation, 2).energy, 0.75,
-        "nearest agent wins food even when its stable ID is higher");
-    expect_equal(agent_with_id(nearest_simulation, 1).energy, 0.25,
-        "farther low-ID agent loses food contention");
-}
-
-// Verifies reproduction, energy splitting, placement, lineage, and mutation.
-void test_reproduction_and_mutation()
-{
-    evobrain::SimulationConfig config = controlled_config();
-    config.target_food_count = 1;
-    config.food_population_threshold = 0;
-    config.food_energy = 0.25;
-    config.eating_radius = 0.1;
-    config.reproduction_threshold = 1.0;
-    config.maximum_movement_per_tick = 0.01;
-    const evobrain::Agent parent =
-        controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 0.75);
-    evobrain::Simulation simulation = controlled_simulation(
-        config,
-        {parent},
-        {{.id = 1, .position = {.x = 0.5, .y = 0.5}}});
-
-    simulation.tick();
-
-    expect_equal(simulation.agents().size(), std::size_t {2},
-        "one eligible parent creates one child");
-    const evobrain::Agent& updated_parent = agent_with_id(simulation, 1);
-    const evobrain::Agent& child = agent_with_id(simulation, 2);
-    expect_equal(updated_parent.energy, 0.5, "parent retains half the energy");
-    expect_equal(child.energy, 0.5, "child receives half the energy");
-    expect_equal(updated_parent.brain, parent.brain, "parent brain does not mutate");
-    expect_equal(child.generation, std::uint64_t {1},
-        "child advances one lineage generation");
-    expect_equal(child.age, std::uint64_t {0}, "child does not age on birth tick");
-    expect_near(child.position.x, 0.49, 1e-12, "child starts behind parent");
-    expect_near(child.direction, std::numbers::pi_v<double>, 1e-12,
-        "child faces opposite parent");
-
-    std::size_t changed_parameters = 0;
-    for (std::size_t index = 0; index < evobrain::brain_parameter_count; ++index) {
-        if (child.brain[index] != parent.brain[index]) {
-            ++changed_parameters;
-        }
-    }
-    expect_equal(changed_parameters, std::size_t {1},
-        "exactly one child brain parameter changes");
-    for (std::size_t index = 0; index < evobrain::brain_parameter_count; ++index) {
-        expect_true(
-            std::abs(child.brain[index] - parent.brain[index])
-                <= config.mutation_strength,
-            "child mutation remains inside the configured mutation range");
-    }
-    expect_equal(simulation.stats().births, std::uint64_t {1},
-        "reproduction birth is counted");
-}
-
-// Verifies newborns wait a tick and controlled conditions reach generations.
-void test_multiple_lineage_generations()
-{
-    evobrain::SimulationConfig config = controlled_config();
-    config.reproduction_threshold = 1.0;
-    evobrain::Simulation simulation = controlled_simulation(
-        config,
-        {controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 4.0)},
-        {});
-
-    simulation.tick();
-    expect_equal(simulation.agents().size(), std::size_t {2},
-        "new child does not reproduce on birth tick");
-    simulation.tick();
-
-    const auto highest_generation = std::ranges::max_element(
-        simulation.agents(), {}, &evobrain::Agent::generation)->generation;
-    expect_equal(highest_generation, std::uint64_t {2},
-        "controlled simulation reaches multiple lineage generations");
-}
-
-// Verifies deaths trigger random generation-zero population restoration.
-void test_minimum_population_restoration()
+void test_population_floor_and_food_replenishment()
 {
     evobrain::SimulationConfig config = controlled_config();
     config.initial_population = 2;
     config.minimum_population = 2;
-    config.living_energy_cost = 1.0;
-    evobrain::Simulation simulation = controlled_simulation(
-        config,
-        {
-            controlled_agent(1, {.x = 0.2, .y = 0.2}, 0.0, 0.5),
-            controlled_agent(2, {.x = 0.8, .y = 0.8}, 0.0, 0.5),
-        },
-        {});
-
+    config.target_food_count = 3;
+    config.food_population_threshold = 3;
+    config.food_boost_population_threshold = 0;
+    config.boosted_food_count = 3;
+    config.maximum_new_food_per_tick = 2;
+    config.living_energy_cost = 100.0;
+    evobrain::Simulation simulation(config);
+    evobrain::SimulationSnapshot empty_food = simulation.snapshot();
+    empty_food.food.clear();
+    empty_food.next_food_id = 1;
+    simulation = evobrain::Simulation::from_snapshot(std::move(empty_food));
     simulation.tick();
-
-    expect_equal(simulation.agents().size(), std::size_t {2},
-        "population floor is restored");
-    expect_equal(simulation.stats().deaths, std::uint64_t {2},
-        "founder deaths are counted");
+    expect_equal(simulation.agents().size(), std::size_t {2}, "population floor restores founders");
     expect_equal(simulation.stats().introduced_agents, std::uint64_t {2},
-        "random introductions are counted separately");
+        "introduced founders are counted");
     expect_true(std::ranges::all_of(simulation.agents(), [](const evobrain::Agent& agent) {
-        return agent.age == 0 && agent.generation == 0;
-    }), "introduced founders do not act and start at generation zero");
+        return agent.diet == evobrain::Diet::herbivore;
+    }), "population-floor founders are always herbivores");
+    expect_equal(simulation.food().size(), std::size_t {2},
+        "whole food spawning obeys its per-tick limit");
+    simulation.tick();
+    expect_equal(simulation.food().size(), std::size_t {3},
+        "gradual spawning stops exactly at the population-band ceiling");
 }
 
-// Verifies population pressure pauses and later resumes food replacement.
-void test_population_controlled_food_replacement()
+void test_periodic_carnivore_introduction()
 {
-    evobrain::SimulationConfig config = controlled_config();
-    config.target_food_count = 2;
-    config.food_population_threshold = 1;
-    config.eating_radius = 0.1;
-    evobrain::Simulation simulation = controlled_simulation(
-        config,
-        {controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 1.0)},
+    evobrain::SimulationConfig config = controlled_config(91);
+    config.carnivore_introduction_interval_ticks = 5;
+    config.carnivore_introduction_herbivore_threshold = 2;
+    config.carnivore_introduction_ceiling = 3;
+    config.carnivore_introduction_population_ceiling = 5;
+    config.carnivore_introduction_batch = 2;
+    evobrain::Simulation simulation = controlled_simulation(config,
         {
-            {.id = 1, .position = {.x = 0.5, .y = 0.5}},
-            {.id = 2, .position = {.x = 0.5, .y = 0.5}},
-        });
-
+            controlled_agent(1, {.x = 0.2, .y = 0.2}, 0.0, 1.0),
+            controlled_agent(2, {.x = 0.8, .y = 0.8}, 0.0, 1.0),
+        }, {});
+    evobrain::SimulationSnapshot before_check = simulation.snapshot();
+    before_check.current_tick = 3;
+    simulation = evobrain::Simulation::from_snapshot(std::move(before_check));
     simulation.tick();
-    expect_true(simulation.food().empty(),
-        "food is not replaced at the population threshold");
-
-    evobrain::SimulationSnapshot starving = simulation.snapshot();
-    starving.config.living_energy_cost = 100.0;
-    evobrain::Simulation resumed =
-        evobrain::Simulation::from_snapshot(std::move(starving));
-    resumed.tick();
-    expect_true(resumed.agents().empty(), "population falls below threshold");
-    expect_equal(resumed.food().size(), std::size_t {2},
-        "food replacement resumes below threshold");
-}
-
-// Verifies replacement food is retained until the tick after it is created.
-void test_replacement_food_waits_until_next_tick()
-{
-    evobrain::SimulationConfig config = controlled_config();
-    config.target_food_count = 1;
-    config.food_population_threshold = 2;
-    config.eating_radius = 1.0;
-    evobrain::Simulation simulation = controlled_simulation(
-        config,
-        {controlled_agent(1, {.x = 0.5, .y = 0.5}, 0.0, 1.0)},
-        {{.id = 1, .position = {.x = 0.5, .y = 0.5}}});
-
+    expect_equal(simulation.stats().carnivores, std::uint64_t {0},
+        "carnivores are not introduced between periodic checks");
     simulation.tick();
-    expect_equal(simulation.food().size(), std::size_t {1},
-        "replacement food remains after its creation tick");
-    const std::uint64_t first_replacement_id = simulation.food().front().id;
+    expect_equal(simulation.stats().carnivores, std::uint64_t {2},
+        "eligible periodic check introduces one configured cohort");
 
+    evobrain::SimulationSnapshot remainder = simulation.snapshot();
+    remainder.current_tick = 9;
+    simulation = evobrain::Simulation::from_snapshot(std::move(remainder));
     simulation.tick();
-    expect_equal(simulation.food().size(), std::size_t {1},
-        "consumed replacement food is replenished on the following tick");
-    expect_true(simulation.food().front().id != first_replacement_id,
-        "food created on the previous tick can be consumed on the next tick");
+    expect_equal(simulation.stats().carnivores, std::uint64_t {3},
+        "periodic introduction adds only the remainder to its carnivore ceiling");
+    expect_equal(simulation.stats().population, std::uint64_t {5},
+        "periodic introduction also respects the total-population ceiling");
+
+    evobrain::SimulationConfig full_batch = controlled_config(92);
+    full_batch.carnivore_introduction_interval_ticks = 5;
+    full_batch.carnivore_introduction_herbivore_threshold = 2;
+    full_batch.carnivore_introduction_ceiling = 30;
+    full_batch.carnivore_introduction_population_ceiling = 50;
+    full_batch.carnivore_introduction_batch = 15;
+    std::vector<evobrain::Agent> founders {
+        controlled_agent(1, {.x = 0.1, .y = 0.1}, 0.0, 1.0),
+        controlled_agent(2, {.x = 0.2, .y = 0.2}, 0.0, 1.0),
+    };
+    for (std::uint64_t id = 3; id < 8; ++id) {
+        founders.push_back(controlled_agent(id,
+            {.x = 0.1 * static_cast<double>(id), .y = 0.5}, 0.0, 1.0,
+            evobrain::Diet::carnivore));
+    }
+    evobrain::Simulation five_carnivores =
+        controlled_simulation(full_batch, founders, {});
+    evobrain::SimulationSnapshot full_batch_snapshot = five_carnivores.snapshot();
+    full_batch_snapshot.current_tick = 4;
+    five_carnivores =
+        evobrain::Simulation::from_snapshot(std::move(full_batch_snapshot));
+    five_carnivores.tick();
+    expect_equal(five_carnivores.stats().carnivores, std::uint64_t {20},
+        "five existing carnivores receive the complete fifteen-founder cohort");
+
+    evobrain::SimulationConfig population_capped = full_batch;
+    population_capped.carnivore_introduction_population_ceiling = 8;
+    evobrain::Simulation near_population_ceiling =
+        controlled_simulation(population_capped, std::move(founders), {});
+    evobrain::SimulationSnapshot population_snapshot = near_population_ceiling.snapshot();
+    population_snapshot.current_tick = 4;
+    near_population_ceiling =
+        evobrain::Simulation::from_snapshot(std::move(population_snapshot));
+    near_population_ceiling.tick();
+    expect_equal(near_population_ceiling.stats().population, std::uint64_t {8},
+        "carnivore cohort is independently capped by total population room");
+    expect_equal(near_population_ceiling.stats().carnivores, std::uint64_t {6},
+        "population cap adds only one carnivore when one agent slot remains");
 }
 
 } // namespace
 
-// Runs the lightweight core test suite and reports failures through the exit code.
 int main()
 {
-    test_simulation_ticks();
-    test_run_for_equivalence();
-    test_seed_behavior();
-    test_known_pcg32_sequence();
-    test_random_sampling_and_restore();
-    test_brain_evaluation();
-    test_configuration_validation();
-    test_initialization_and_seeded_state();
-    test_movement_and_wraparound();
-    test_turning_movement_and_energy_costs();
-    test_nearest_food_wraparound_sensing();
-    test_no_food_sensor_values();
-    test_death_before_eating();
-    test_food_consumption_and_contention();
-    test_reproduction_and_mutation();
-    test_multiple_lineage_generations();
-    test_minimum_population_restoration();
-    test_population_controlled_food_replacement();
-    test_replacement_food_waits_until_next_tick();
+    test_random_and_fixed_tick_determinism();
+    test_spatial_index_and_thread_determinism();
+    test_brain_topology_and_ranges();
+    test_configuration_and_founders();
+    test_literal_ray_first_hit_and_wrap();
+    test_configured_world_movement_wrap();
+    test_gradual_diet_specific_eating();
+    test_mutual_and_proportional_agent_bites();
+    test_inherited_mutation_and_reproduction_geometry();
+    test_population_food_boost_and_natural_excess_reduction();
+    test_global_food_regrowth_pulse();
+    test_population_floor_and_food_replenishment();
+    test_periodic_carnivore_introduction();
     failure_count += run_checkpoint_tests();
-
     if (failure_count != 0) {
         std::cerr << failure_count << " test expectation(s) failed\n";
         return 1;
     }
-
     std::cout << "All evobrain core tests passed\n";
     return 0;
 }

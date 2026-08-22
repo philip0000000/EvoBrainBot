@@ -41,6 +41,7 @@ endif()
 add_executable(EvoBrainBot
     "src/runner/command_line.cpp"
     "src/runner/main.cpp"
+    "src/runner/training_stop.cpp"
 )
 
 target_link_libraries(EvoBrainBot PRIVATE evobrain_core)

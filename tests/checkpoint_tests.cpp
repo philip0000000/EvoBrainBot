@@ -32,6 +32,18 @@ std::string saved_checkpoint(const evobrain::Simulation& simulation)
     return output.str();
 }
 
+// Keeps persistence tests bounded so they do not double as population stress tests.
+evobrain::SimulationConfig checkpoint_config(const std::uint64_t seed)
+{
+    evobrain::SimulationConfig config {.seed = seed};
+    config.target_food_count = 0;
+    config.food_population_threshold = 0;
+    config.food_boost_population_threshold = 0;
+    config.boosted_food_count = 0;
+    config.reproduction_threshold = 100.0;
+    return config;
+}
+
 // Loads one simulation from an in-memory binary checkpoint string.
 evobrain::Simulation load_saved_checkpoint(const std::string& data)
 {
@@ -51,10 +63,25 @@ void expect_checkpoint_rejected(
     }
 }
 
+// Verifies old checkpoints fail with the public compatibility error promised to users.
+void expect_unsupported_version(const std::string& data)
+{
+    try {
+        static_cast<void>(load_saved_checkpoint(data));
+        expect_checkpoint(false, "version-1 checkpoint is rejected");
+    } catch (const std::runtime_error& error) {
+        expect_checkpoint(
+            std::string_view(error.what()) == "unsupported EvoBrainBot checkpoint version",
+            "version-1 checkpoint reports the unsupported-version error");
+    } catch (...) {
+        expect_checkpoint(false, "version-1 checkpoint uses runtime compatibility error");
+    }
+}
+
 // Verifies binary save/load preserves every deterministic state field exactly.
 void test_checkpoint_round_trip()
 {
-    evobrain::Simulation original(evobrain::SimulationConfig {.seed = 991});
+    evobrain::Simulation original(checkpoint_config(991));
     original.run_for(37);
     evobrain::Simulation restored = load_saved_checkpoint(saved_checkpoint(original));
 
@@ -65,10 +92,10 @@ void test_checkpoint_round_trip()
 // Verifies resumed execution equals the same uninterrupted seeded execution.
 void test_checkpoint_continuation()
 {
-    evobrain::Simulation uninterrupted(evobrain::SimulationConfig {.seed = 552});
+    evobrain::Simulation uninterrupted(checkpoint_config(552));
     uninterrupted.run_for(60);
 
-    evobrain::Simulation first_part(evobrain::SimulationConfig {.seed = 552});
+    evobrain::Simulation first_part(checkpoint_config(552));
     first_part.run_for(23);
     evobrain::Simulation resumed = load_saved_checkpoint(saved_checkpoint(first_part));
     resumed.run_for(37);
@@ -80,7 +107,7 @@ void test_checkpoint_continuation()
 // Verifies zero-tick initial state can be checkpointed and restored.
 void test_initial_checkpoint()
 {
-    evobrain::Simulation initial(evobrain::SimulationConfig {.seed = 0});
+    evobrain::Simulation initial(checkpoint_config(0));
     evobrain::Simulation restored = load_saved_checkpoint(saved_checkpoint(initial));
     expect_checkpoint(initial.snapshot() == restored.snapshot(),
         "initial state checkpoint round trips");
@@ -89,7 +116,7 @@ void test_initial_checkpoint()
 // Verifies invalid identifiers, versions, truncation, and trailing data fail.
 void test_invalid_checkpoints()
 {
-    evobrain::Simulation simulation(evobrain::SimulationConfig {.seed = 3});
+    evobrain::Simulation simulation(checkpoint_config(3));
     const std::string valid = saved_checkpoint(simulation);
 
     std::string invalid_identifier = valid;
@@ -99,9 +126,8 @@ void test_invalid_checkpoints()
 
     std::string unsupported_version = valid;
     // The four-byte little-endian version immediately follows the 8-byte magic.
-    unsupported_version[8] = 2;
-    expect_checkpoint_rejected(unsupported_version,
-        "unsupported checkpoint version is rejected");
+    unsupported_version[8] = 1;
+    expect_unsupported_version(unsupported_version);
 
     expect_checkpoint_rejected(valid.substr(0, valid.size() / 2),
         "truncated checkpoint is rejected");
