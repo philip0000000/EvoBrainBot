@@ -164,7 +164,14 @@ measurement. See `docs/viewer-performance.md` for the recorded acceptance run.
 
 ## Run headless
 
-Start a new simulation with an explicit seed and tick count:
+Start a new simulation with a random seed from 1 through 999. It runs until
+`Q`, `q`, `SIGINT`, or `SIGTERM` requests a graceful stop:
+
+```sh
+./build/EvoBrainBot run
+```
+
+Supply a seed and tick limit for a reproducible finite run:
 
 ```sh
 ./build/EvoBrainBot run --seed 1234 --ticks 1000
@@ -177,9 +184,11 @@ selected configuration directory:
 .\build\Release\EvoBrainBot.exe run --seed 1234 --ticks 1000
 ```
 
-The final summary reports completed ticks; total, herbivore, and carnivore
-populations; food; reproduction births; random agent introductions; deaths;
-and agents killed through eating.
+An attached terminal displays the checkpoint filename, selected seed, completed
+ticks, total, herbivore, and carnivore populations, food, reproduction births,
+random agent introductions, deaths, and agents killed through eating. `Q` or
+`q` stops a finite run early as well as stopping an indefinite run. The final
+status is printed after the checkpoint is saved.
 
 ### Plant-food recovery
 
@@ -202,18 +211,21 @@ later exceed them.
 
 ### Save and resume
 
-Every successful `run` command saves the complete final simulation state. If
-`--checkpoint-out` is omitted from `run`, the state is written to `autosave.evo`
-in the current directory, replacing an existing file with that name. The
-`resume` command does not accept `--checkpoint-out`; it atomically replaces the
-checkpoint file supplied as its positional argument.
+Every successful `run` command saves the complete final simulation state when
+its tick limit or a graceful stop ends training. If its optional checkpoint
+argument is omitted, the state is written to `autosave.evo` in the current
+directory, replacing an existing file with that name.
 
-Choose a different checkpoint path with `--checkpoint-out`:
+Choose a different checkpoint path with one positional argument. The checkpoint
+may appear before, after, or between the options:
 
 ```sh
-./build/EvoBrainBot run --seed 1234 --ticks 1000 \
-    --checkpoint-out state.evo
+./build/EvoBrainBot run state.evo --ticks 1000 --seed 1234
 ```
+
+If the final filename contains no dot, `run` appends `.evo`. For example,
+`state` becomes `state.evo`, while `state.data` remains unchanged. Dots in
+parent directory names do not prevent the extension from being appended.
 
 Resume a checkpoint for an optional additional number of ticks. The completed
 state atomically replaces the same checkpoint file:
@@ -225,38 +237,38 @@ state atomically replaces the same checkpoint file:
 On Windows with a Visual Studio generator:
 
 ```powershell
-.\build\Release\EvoBrainBot.exe run --seed 1234 --ticks 1000 `
-    --checkpoint-out state.evo
+.\build\Release\EvoBrainBot.exe run state.evo --ticks 1000 --seed 1234
 
 .\build\Release\EvoBrainBot.exe resume state.evo --ticks 500
 ```
 
-For `resume`, `--ticks` means the maximum additional ticks executed by the
-current command. Omit it to continue until `Q`, `q`, `SIGINT`, or `SIGTERM`
-requests a graceful stop. An attached terminal displays live cumulative
-statistics and accepts `Q` without Enter. Non-interactive Linux or RunPod jobs
-can stop gracefully through `SIGINT` or `SIGTERM`. A resumed run obtains its
-original seed, configuration, accumulated statistics, entities, and
-random-generator state from the checkpoint.
+For `resume`, the checkpoint path must match the existing filename exactly;
+`.evo` is not appended automatically. `--ticks` means the maximum additional
+ticks executed by the current command. Omit it to continue until `Q`, `q`,
+`SIGINT`, or `SIGTERM` requests a graceful stop. The completed state atomically
+replaces the input checkpoint. An attached terminal accepts `Q` or `q` without
+Enter. Non-interactive Linux or RunPod jobs can stop gracefully through
+`SIGINT` or `SIGTERM`. A resumed run obtains its original seed, configuration,
+accumulated statistics, entities, and random-generator state from the
+checkpoint.
 
 Checkpoints use version 3 of the binary format and preserve the complete
 predator-prey state. Older and other unsupported, incomplete, or invalid
 checkpoint files are rejected instead of being partially loaded.
 
-Display the available commands or help for `run` with:
+Display the consolidated command help by running the executable without
+arguments or with `--help`:
 
 ```sh
+./build/EvoBrainBot
 ./build/EvoBrainBot --help
-./build/EvoBrainBot run --help
-./build/EvoBrainBot resume --help
 ```
 
 On Windows with a Visual Studio generator:
 
 ```powershell
+.\build\Release\EvoBrainBot.exe
 .\build\Release\EvoBrainBot.exe --help
-.\build\Release\EvoBrainBot.exe run --help
-.\build\Release\EvoBrainBot.exe resume --help
 ```
 
 ## License
