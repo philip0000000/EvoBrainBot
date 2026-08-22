@@ -13,10 +13,12 @@
 #include <fstream>
 #include <optional>
 #include <ostream>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -27,32 +29,25 @@ namespace {
 
 constexpr std::string_view top_level_help =
     "Usage:\n"
-    "  EvoBrainBot --help\n"
-    "  EvoBrainBot run --help\n"
-    "  EvoBrainBot run --seed <seed> --ticks <ticks> [--checkpoint-out <path>]\n"
-    "  EvoBrainBot resume --help\n"
-    "  EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>]\n";
-
-constexpr std::string_view run_help =
-    "Usage: EvoBrainBot run --seed <seed> --ticks <ticks> "
-    "[--checkpoint-out <path>]\n"
+    "  EvoBrainBot [--help]\n"
+    "  EvoBrainBot run [<checkpoint>] [--seed <seed>] [--ticks <ticks>]\n"
+    "  EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>]\n"
     "\n"
-    "Seed and ticks are required decimal unsigned 64-bit integers.\n"
-    "If checkpoint-out is omitted, the final state is saved to autosave.evo.\n";
-
-constexpr std::string_view resume_help =
-    "Usage: EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>]\n"
+    "Run starts a new simulation. Seed defaults to a random integer from 1 to 999.\n"
+    "Without ticks, training continues until Q, q, SIGINT, or SIGTERM requests a stop.\n"
+    "The checkpoint defaults to autosave.evo; .evo is appended when its filename\n"
+    "contains no dot. The checkpoint is saved when training stops.\n"
     "\n"
-    "Ticks is an optional decimal unsigned 64-bit limit for this command.\n"
-    "Without ticks, training continues until Q, SIGINT, or SIGTERM requests a stop.\n"
-    "The completed state atomically replaces the input checkpoint.\n";
+    "Resume continues the exact checkpoint path supplied. Without ticks, it also\n"
+    "continues until Q, q, SIGINT, or SIGTERM requests a stop, then atomically replaces\n"
+    "the input checkpoint. Seed and ticks are decimal unsigned 64-bit integers.\n";
 
 constexpr char default_checkpoint_output[] = "autosave.evo";
 
 struct RunOptions {
     std::optional<std::uint64_t> seed;
     std::optional<std::uint64_t> ticks;
-    std::optional<std::string> checkpoint_output;
+    std::optional<std::filesystem::path> checkpoint;
 };
 
 struct ResumeOptions {
@@ -94,6 +89,29 @@ std::optional<std::uint64_t> parse_unsigned_decimal(const std::string_view text)
     return value;
 }
 
+// Generates the small default seed pool exposed by the headless CLI.
+std::uint64_t generate_default_seed()
+{
+    std::random_device entropy_source;
+    std::uniform_int_distribution<std::uint64_t> distribution(1, 999);
+    return distribution(entropy_source);
+}
+
+// Applies run-only checkpoint defaults without changing explicitly suffixed names.
+std::filesystem::path normalize_run_checkpoint(
+    std::optional<std::filesystem::path> checkpoint)
+{
+    std::filesystem::path result = checkpoint.value_or(default_checkpoint_output);
+    // Keep the filename storage alive while checking only its final component.
+    const auto filename = result.filename().native();
+    if (!filename.empty()
+        && filename.find(std::filesystem::path::value_type {'.'})
+            == std::filesystem::path::string_type::npos) {
+        result += ".evo";
+    }
+    return result;
+}
+
 // Returns the following option token or reports the shared missing-value error.
 std::optional<std::string_view> option_value(
     const std::span<const std::string_view> arguments,
@@ -108,23 +126,7 @@ std::optional<std::string_view> option_value(
     return arguments[index + 1];
 }
 
-// Prints the stable final summary shared by new and resumed runs.
-void print_summary(const Simulation& simulation, std::ostream& output)
-{
-    const SimulationStats stats = simulation.stats();
-    output << "Seed: " << stats.seed << '\n'
-           << "Completed ticks: " << stats.completed_ticks << '\n'
-           << "Population: " << stats.population << '\n'
-           << "Herbivores: " << stats.herbivores << '\n'
-           << "Carnivores: " << stats.carnivores << '\n'
-           << "Food: " << stats.food << '\n'
-           << "Births: " << stats.births << '\n'
-           << "Introduced agents: " << stats.introduced_agents << '\n'
-           << "Deaths: " << stats.deaths << '\n'
-           << "Agents eaten: " << stats.agents_eaten << '\n';
-}
-
-// Draws the cumulative training state shown during and after resume execution.
+// Draws the cumulative training state shown during and after headless execution.
 void print_training_status(
     const Simulation& simulation,
     const std::filesystem::path& checkpoint,
@@ -151,6 +153,33 @@ void print_training_status(
         output << "\nPress Q to stop and save.\n";
     }
     output.flush();
+}
+
+// Runs training until its optional tick limit or a graceful stop request.
+bool train_simulation(
+    Simulation& simulation,
+    const std::filesystem::path& checkpoint,
+    const std::optional<std::uint64_t> ticks,
+    std::ostream& output)
+{
+    TrainingStopController stop;
+    const bool interactive = stop.has_interactive_terminal();
+    if (interactive) {
+        print_training_status(simulation, checkpoint, output, true, true);
+    }
+
+    std::uint64_t executed_ticks = 0;
+    auto next_status = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while ((!ticks || executed_ticks < *ticks) && !stop.stop_requested()) {
+        simulation.tick();
+        ++executed_ticks;
+        const auto now = std::chrono::steady_clock::now();
+        if (interactive && now >= next_status) {
+            print_training_status(simulation, checkpoint, output, true, true);
+            next_status = now + std::chrono::milliseconds(250);
+        }
+    }
+    return interactive;
 }
 
 // Saves a completed simulation and verifies buffered data reached the stream.
@@ -229,19 +258,18 @@ int run_simulation_command(
     std::ostream& output,
     std::ostream& error)
 {
-    if (arguments.size() == 1 && arguments.front() == "--help") {
-        output << run_help;
-        return success_exit_code;
-    }
-
     RunOptions options;
-    for (std::size_t index = 0; index < arguments.size(); index += 2) {
-        const std::string_view option = arguments[index];
-        if (!option.starts_with("--")) {
-            return report_usage_error(error, "unexpected positional argument");
+    for (std::size_t index = 0; index < arguments.size();) {
+        const std::string_view argument = arguments[index];
+        if (!argument.starts_with("--")) {
+            if (options.checkpoint.has_value()) {
+                return report_usage_error(error, "unexpected positional argument");
+            }
+            options.checkpoint = std::filesystem::u8path(argument);
+            ++index;
+            continue;
         }
-        if (option != "--seed" && option != "--ticks"
-            && option != "--checkpoint-out") {
+        if (argument != "--seed" && argument != "--ticks") {
             return report_usage_error(error, "unknown option");
         }
         const auto value = option_value(arguments, index, error);
@@ -249,38 +277,30 @@ int run_simulation_command(
             return usage_error_exit_code;
         }
 
-        if (option == "--seed" || option == "--ticks") {
-            std::optional<std::uint64_t>& destination = option == "--seed"
-                ? options.seed
-                : options.ticks;
-            if (destination.has_value()) {
-                return report_usage_error(error, "duplicate option");
-            }
-            destination = parse_unsigned_decimal(*value);
-            if (!destination.has_value()) {
-                return report_usage_error(error, "invalid unsigned integer value");
-            }
-        } else if (option == "--checkpoint-out") {
-            if (options.checkpoint_output.has_value()) {
-                return report_usage_error(error, "duplicate option");
-            }
-            options.checkpoint_output = std::string(*value);
+        std::optional<std::uint64_t>& destination = argument == "--seed"
+            ? options.seed
+            : options.ticks;
+        if (destination.has_value()) {
+            return report_usage_error(error, "duplicate option");
         }
+        destination = parse_unsigned_decimal(*value);
+        if (!destination.has_value()) {
+            return report_usage_error(error, "invalid unsigned integer value");
+        }
+        index += 2;
     }
 
-    if (!options.seed.has_value()) {
-        return report_usage_error(error, "missing required option '--seed'");
-    }
-    if (!options.ticks.has_value()) {
-        return report_usage_error(error, "missing required option '--ticks'");
-    }
-
-    Simulation simulation(SimulationConfig {.seed = *options.seed});
-    simulation.run_for(*options.ticks);
-    save_checkpoint_file(
-        simulation,
-        options.checkpoint_output.value_or(default_checkpoint_output));
-    print_summary(simulation, output);
+    const std::filesystem::path checkpoint =
+        normalize_run_checkpoint(std::move(options.checkpoint));
+    const std::uint64_t seed = options.seed.has_value()
+        ? *options.seed
+        : generate_default_seed();
+    Simulation simulation(SimulationConfig {
+        .seed = seed});
+    const bool interactive =
+        train_simulation(simulation, checkpoint, options.ticks, output);
+    save_checkpoint_file(simulation, checkpoint);
+    print_training_status(simulation, checkpoint, output, interactive, false);
     return success_exit_code;
 }
 
@@ -291,8 +311,7 @@ int resume_simulation_command(
     std::ostream& error)
 {
     if (arguments.size() == 1 && arguments.front() == "--help") {
-        output << resume_help;
-        return success_exit_code;
+        return report_usage_error(error, "unknown option");
     }
 
     if (arguments.empty() || arguments.front().starts_with("--")) {
@@ -323,25 +342,8 @@ int resume_simulation_command(
     }
 
     Simulation simulation = load_checkpoint_file(options.checkpoint);
-    TrainingStopController stop;
-    const bool interactive = stop.has_interactive_terminal();
-    if (interactive) {
-        print_training_status(simulation, options.checkpoint, output, true, true);
-    }
-
-    std::uint64_t executed_ticks = 0;
-    auto next_status = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
-    while ((!options.ticks || executed_ticks < *options.ticks)
-        && !stop.stop_requested()) {
-        simulation.tick();
-        ++executed_ticks;
-        const auto now = std::chrono::steady_clock::now();
-        if (interactive && now >= next_status) {
-            print_training_status(simulation, options.checkpoint, output, true, true);
-            next_status = now + std::chrono::milliseconds(250);
-        }
-    }
-
+    const bool interactive =
+        train_simulation(simulation, options.checkpoint, options.ticks, output);
     replace_checkpoint_file(simulation, options.checkpoint);
     print_training_status(simulation, options.checkpoint, output, interactive, false);
     return success_exit_code;
@@ -355,7 +357,8 @@ int run_command(
     std::ostream& error)
 {
     if (arguments.empty()) {
-        return report_usage_error(error, "missing command");
+        output << top_level_help;
+        return success_exit_code;
     }
     if (arguments.size() == 1 && arguments.front() == "--help") {
         output << top_level_help;
