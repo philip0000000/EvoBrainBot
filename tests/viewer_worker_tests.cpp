@@ -371,6 +371,34 @@ void test_speed_validation()
         "rejected high target preserves previous value");
 }
 
+// Verifies backend selection is transient, explicit, and limited to paused state.
+void test_brain_backend_selection()
+{
+    evobrain::viewer::SimulationWorker worker;
+    expect(!worker.set_brain_backend(evobrain::BrainBackendKind::cpu).succeeded,
+        "backend selection requires a loaded simulation");
+    evobrain::Simulation simulation(evobrain::SimulationConfig {.seed = 81});
+    expect(worker.load_snapshot(simulation.snapshot()).succeeded,
+        "backend test loads its simulation");
+    expect(worker.status().brain_backend == evobrain::BrainBackendKind::cpu,
+        "viewer defaults to CPU brain evaluation");
+    if (worker.status().gpu_backend_available) {
+        expect(worker.set_brain_backend(evobrain::BrainBackendKind::gpu).succeeded,
+            "available GPU backend can be selected while paused");
+    } else {
+        expect(!worker.set_brain_backend(evobrain::BrainBackendKind::gpu).succeeded,
+            "unavailable GPU backend reports an explicit failure");
+        expect(worker.status().brain_backend == evobrain::BrainBackendKind::cpu,
+            "failed GPU selection does not silently change backend");
+    }
+    expect(worker.run().succeeded, "backend test starts playback");
+    expect(!worker.set_brain_backend(evobrain::BrainBackendKind::cpu).succeeded,
+        "backend cannot change while simulation is running");
+    expect(worker.pause().succeeded, "backend test pauses playback");
+    expect(worker.set_brain_backend(evobrain::BrainBackendKind::cpu).succeeded,
+        "CPU backend can be restored while paused");
+}
+
 // Verifies destruction stops and joins a worker that is actively advancing.
 void test_clean_worker_shutdown()
 {
@@ -519,6 +547,7 @@ int main()
     test_failed_load_preserves_state(directory);
     test_save_reload_and_unsaved_state(directory);
     test_speed_validation();
+    test_brain_backend_selection();
     test_clean_worker_shutdown();
     test_fast_forward_snapshot_policy();
     test_camera_reset_and_transform();

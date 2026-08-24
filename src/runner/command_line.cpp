@@ -30,8 +30,10 @@ namespace {
 constexpr std::string_view top_level_help =
     "Usage:\n"
     "  EvoBrainBot [--help]\n"
-    "  EvoBrainBot run [<checkpoint>] [--seed <seed>] [--ticks <ticks>]\n"
-    "  EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>]\n"
+    "  EvoBrainBot run [<checkpoint>] [--seed <seed>] [--ticks <ticks>]"
+    " [--brain-backend cpu|gpu]\n"
+    "  EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>]"
+    " [--brain-backend cpu|gpu]\n"
     "\n"
     "Run starts a new simulation. Seed defaults to a random integer from 1 to 999.\n"
     "Without ticks, training continues until Q, q, SIGINT, or SIGTERM requests a stop.\n"
@@ -48,11 +50,13 @@ struct RunOptions {
     std::optional<std::uint64_t> seed;
     std::optional<std::uint64_t> ticks;
     std::optional<std::filesystem::path> checkpoint;
+    std::optional<BrainBackendKind> brain_backend;
 };
 
 struct ResumeOptions {
     std::filesystem::path checkpoint;
     std::optional<std::uint64_t> ticks;
+    std::optional<BrainBackendKind> brain_backend;
 };
 
 // Reports a command-line usage error and returns the documented exit code.
@@ -87,6 +91,14 @@ std::optional<std::uint64_t> parse_unsigned_decimal(const std::string_view text)
         return std::nullopt;
     }
     return value;
+}
+
+// Parses the stable backend names shared with the GUI and diagnostics.
+std::optional<BrainBackendKind> parse_brain_backend(const std::string_view text)
+{
+    if (text == "cpu") return BrainBackendKind::cpu;
+    if (text == "gpu") return BrainBackendKind::gpu;
+    return std::nullopt;
 }
 
 // Generates the small default seed pool exposed by the headless CLI.
@@ -139,6 +151,7 @@ void print_training_status(
     }
     const SimulationStats stats = simulation.stats();
     output << "File: " << checkpoint.string() << '\n'
+           << "Brain backend: " << brain_backend_name(simulation.brain_backend()) << '\n'
            << "Seed: " << stats.seed << '\n'
            << "Tick: " << stats.completed_ticks << '\n'
            << "Population: " << stats.population << '\n'
@@ -269,7 +282,8 @@ int run_simulation_command(
             ++index;
             continue;
         }
-        if (argument != "--seed" && argument != "--ticks") {
+        if (argument != "--seed" && argument != "--ticks"
+            && argument != "--brain-backend") {
             return report_usage_error(error, "unknown option");
         }
         const auto value = option_value(arguments, index, error);
@@ -277,15 +291,25 @@ int run_simulation_command(
             return usage_error_exit_code;
         }
 
-        std::optional<std::uint64_t>& destination = argument == "--seed"
-            ? options.seed
-            : options.ticks;
-        if (destination.has_value()) {
-            return report_usage_error(error, "duplicate option");
-        }
-        destination = parse_unsigned_decimal(*value);
-        if (!destination.has_value()) {
-            return report_usage_error(error, "invalid unsigned integer value");
+        if (argument == "--brain-backend") {
+            if (options.brain_backend.has_value()) {
+                return report_usage_error(error, "duplicate option");
+            }
+            options.brain_backend = parse_brain_backend(*value);
+            if (!options.brain_backend.has_value()) {
+                return report_usage_error(error, "brain backend must be cpu or gpu");
+            }
+        } else {
+            std::optional<std::uint64_t>& destination = argument == "--seed"
+                ? options.seed
+                : options.ticks;
+            if (destination.has_value()) {
+                return report_usage_error(error, "duplicate option");
+            }
+            destination = parse_unsigned_decimal(*value);
+            if (!destination.has_value()) {
+                return report_usage_error(error, "invalid unsigned integer value");
+            }
         }
         index += 2;
     }
@@ -295,8 +319,9 @@ int run_simulation_command(
     const std::uint64_t seed = options.seed.has_value()
         ? *options.seed
         : generate_default_seed();
-    Simulation simulation(SimulationConfig {
-        .seed = seed});
+    Simulation simulation(SimulationConfig {.seed = seed},
+        SimulationExecutionConfig {
+            .brain_backend = options.brain_backend.value_or(BrainBackendKind::cpu)});
     const bool interactive =
         train_simulation(simulation, checkpoint, options.ticks, output);
     save_checkpoint_file(simulation, checkpoint);
@@ -324,7 +349,7 @@ int resume_simulation_command(
         if (!option.starts_with("--")) {
             return report_usage_error(error, "unexpected positional argument");
         }
-        if (option != "--ticks") {
+        if (option != "--ticks" && option != "--brain-backend") {
             return report_usage_error(error, "unknown option");
         }
         const auto value = option_value(arguments, index, error);
@@ -332,16 +357,28 @@ int resume_simulation_command(
             return usage_error_exit_code;
         }
 
-        if (options.ticks.has_value()) {
-            return report_usage_error(error, "duplicate option");
-        }
-        options.ticks = parse_unsigned_decimal(*value);
-        if (!options.ticks.has_value()) {
-            return report_usage_error(error, "invalid unsigned integer value");
+        if (option == "--brain-backend") {
+            if (options.brain_backend.has_value()) {
+                return report_usage_error(error, "duplicate option");
+            }
+            options.brain_backend = parse_brain_backend(*value);
+            if (!options.brain_backend.has_value()) {
+                return report_usage_error(error, "brain backend must be cpu or gpu");
+            }
+        } else {
+            if (options.ticks.has_value()) {
+                return report_usage_error(error, "duplicate option");
+            }
+            options.ticks = parse_unsigned_decimal(*value);
+            if (!options.ticks.has_value()) {
+                return report_usage_error(error, "invalid unsigned integer value");
+            }
         }
     }
 
     Simulation simulation = load_checkpoint_file(options.checkpoint);
+    simulation.set_brain_backend(
+        options.brain_backend.value_or(BrainBackendKind::cpu));
     const bool interactive =
         train_simulation(simulation, options.checkpoint, options.ticks, output);
     replace_checkpoint_file(simulation, options.checkpoint);

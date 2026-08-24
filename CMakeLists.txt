@@ -16,12 +16,41 @@ option(
     ${EVOBRAIN_VIEWER_DEFAULT}
 )
 
+option(
+    EVOBRAIN_ENABLE_CUDA
+    "Build the optional CUDA brain backend when a CUDA compiler is available"
+    ON
+)
+set(EVOBRAIN_CUDA_ARCHITECTURES "75;80;86;89;90" CACHE STRING
+    "CUDA architectures for local Turing and common RunPod GPU families")
+
+set(EVOBRAIN_CUDA_ENABLED OFF)
+if(EVOBRAIN_ENABLE_CUDA AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        find_package(CUDAToolkit REQUIRED)
+        set(EVOBRAIN_CUDA_ENABLED ON)
+        message(STATUS "EvoBrainBot CUDA brain backend enabled")
+    else()
+        message(STATUS "CUDA compiler not found; building CPU brain backend only")
+    endif()
+endif()
+
 add_library(evobrain_core STATIC
     "src/core/brain.cpp"
+    "src/core/brain_backend.cpp"
     "src/core/checkpoint.cpp"
     "src/core/random.cpp"
     "src/core/simulation.cpp"
 )
+
+if(EVOBRAIN_CUDA_ENABLED)
+    target_sources(evobrain_core PRIVATE "src/core/cuda_brain_backend.cu")
+    target_compile_definitions(evobrain_core PRIVATE EVOBRAIN_HAS_CUDA=1)
+    target_link_libraries(evobrain_core PUBLIC CUDA::cudart)
+endif()
 
 target_include_directories(evobrain_core
     PUBLIC
@@ -34,8 +63,22 @@ set_target_properties(evobrain_core PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
+if(EVOBRAIN_CUDA_ENABLED)
+    set_target_properties(evobrain_core PROPERTIES
+        CUDA_STANDARD 20
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_EXTENSIONS OFF
+        CUDA_ARCHITECTURES "${EVOBRAIN_CUDA_ARCHITECTURES}"
+    )
+endif()
+
 if(MSVC)
-    target_compile_options(evobrain_core PRIVATE /EHsc)
+    target_compile_options(evobrain_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+endif()
+if(EVOBRAIN_CUDA_ENABLED)
+    # Recurrent trajectories amplify one-ULP differences, so mirror CPU multiply/add.
+    target_compile_options(evobrain_core PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
 endif()
 
 add_executable(EvoBrainBot
@@ -264,6 +307,11 @@ if(EVOBRAIN_BUILD_VIEWER)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md" DESTINATION .)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/viewer-performance.md"
         DESTINATION docs)
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/brain-architecture.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/gpu-brain-optimization.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/optimization-architecture.md"
+        DESTINATION docs)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
         DESTINATION licenses RENAME EvoBrainBot-MIT.txt)
     install(FILES "${sdl3_SOURCE_DIR}/LICENSE.txt"
@@ -289,6 +337,19 @@ if(EVOBRAIN_BUILD_VIEWER)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(evobrain_brain_benchmark
+        "tests/brain_benchmark.cpp"
+    )
+    target_link_libraries(evobrain_brain_benchmark PRIVATE evobrain_core)
+    set_target_properties(evobrain_brain_benchmark PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+    if(MSVC)
+        target_compile_options(evobrain_brain_benchmark PRIVATE /EHsc)
+    endif()
+
     add_executable(evobrain_tests
         "tests/checkpoint_tests.cpp"
         "tests/simulation_tests.cpp"

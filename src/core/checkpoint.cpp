@@ -19,7 +19,18 @@ namespace {
 constexpr std::array<char, 8> checkpoint_identifier {
     'E', 'V', 'O', 'B', 'R', 'A', 'I', 'N',
 };
-constexpr std::uint32_t checkpoint_version = 3;
+constexpr std::uint32_t checkpoint_version = 4;
+constexpr std::uint32_t legacy_checkpoint_version = 3;
+constexpr std::size_t legacy_hidden_count = 8;
+constexpr std::size_t legacy_input_hidden_weight_count =
+    brain_input_count * legacy_hidden_count;
+constexpr std::size_t legacy_hidden_bias_offset = legacy_input_hidden_weight_count;
+constexpr std::size_t legacy_hidden_output_weight_offset =
+    legacy_hidden_bias_offset + legacy_hidden_count;
+constexpr std::size_t legacy_output_bias_offset =
+    legacy_hidden_output_weight_offset + legacy_hidden_count * brain_output_count;
+constexpr std::size_t legacy_brain_parameter_count =
+    legacy_output_bias_offset + brain_output_count;
 
 // Writes primitive values using a platform-independent little-endian encoding.
 class BinaryWriter {
@@ -130,7 +141,7 @@ std::size_t collection_size(const std::uint64_t value)
     return static_cast<std::size_t>(value);
 }
 
-// Writes every provisional configuration field in stable version-three order.
+// Writes every provisional configuration field in stable version-four order.
 void write_config(BinaryWriter& writer, const SimulationConfig& config)
 {
     writer.unsigned_64(config.seed);
@@ -177,7 +188,7 @@ void write_config(BinaryWriter& writer, const SimulationConfig& config)
     writer.real(config.mutation_strength_mutation_scale);
 }
 
-// Reads every version-three configuration field in serialized order.
+// Reads configuration fields shared by checkpoint versions three and four.
 SimulationConfig read_config(BinaryReader& reader)
 {
     SimulationConfig config {.seed = reader.unsigned_64()};
@@ -245,12 +256,34 @@ void write_agent(BinaryWriter& writer, const Agent& agent)
     for (const double parameter : agent.brain) {
         writer.real(parameter);
     }
+    writer.byte(agent.brain_structure.founder_fast_path);
+    for (const std::uint8_t active : agent.brain_structure.hidden_active) {
+        writer.byte(active);
+    }
+    for (const std::uint8_t enabled : agent.brain_structure.input_hidden_enabled) {
+        writer.byte(enabled);
+    }
+    for (const std::uint8_t enabled : agent.brain_structure.hidden_output_enabled) {
+        writer.byte(enabled);
+    }
+    for (const std::uint8_t enabled : agent.brain_structure.recurrent_enabled) {
+        writer.byte(enabled);
+    }
+    for (const double weight : agent.brain_structure.recurrent_weights) {
+        writer.real(weight);
+    }
+    for (const double value : agent.brain_state.previous_hidden) {
+        writer.real(value);
+    }
+    for (const double value : agent.brain_state.next_hidden) {
+        writer.real(value);
+    }
 }
 
-// Reads one complete agent from the version-three field sequence.
-Agent read_agent(BinaryReader& reader)
+// Reads the fields that precede all version-specific brain payloads.
+Agent read_agent_header(BinaryReader& reader)
 {
-    Agent agent {
+    return Agent {
         .id = reader.unsigned_64(),
         .position = Vec2 {.x = reader.real(), .y = reader.real()},
         .direction = reader.real(),
@@ -263,8 +296,63 @@ Agent read_agent(BinaryReader& reader)
         .mutation_strength = reader.real(),
         .prior_bite_damage = reader.real(),
     };
+}
+
+// Reads one complete agent from the version-four field sequence.
+Agent read_agent(BinaryReader& reader)
+{
+    Agent agent = read_agent_header(reader);
     for (double& parameter : agent.brain) {
         parameter = reader.real();
+    }
+    agent.brain_structure.founder_fast_path = reader.byte();
+    for (std::uint8_t& active : agent.brain_structure.hidden_active) {
+        active = reader.byte();
+    }
+    for (std::uint8_t& enabled : agent.brain_structure.input_hidden_enabled) {
+        enabled = reader.byte();
+    }
+    for (std::uint8_t& enabled : agent.brain_structure.hidden_output_enabled) {
+        enabled = reader.byte();
+    }
+    for (std::uint8_t& enabled : agent.brain_structure.recurrent_enabled) {
+        enabled = reader.byte();
+    }
+    for (double& weight : agent.brain_structure.recurrent_weights) {
+        weight = reader.real();
+    }
+    for (double& value : agent.brain_state.previous_hidden) {
+        value = reader.real();
+    }
+    for (double& value : agent.brain_state.next_hidden) {
+        value = reader.real();
+    }
+    return agent;
+}
+
+// Upgrades one version-three fixed brain into the founder-compatible new layout.
+Agent read_legacy_agent(BinaryReader& reader)
+{
+    Agent agent = read_agent_header(reader);
+    std::array<double, legacy_brain_parameter_count> legacy {};
+    for (double& parameter : legacy) parameter = reader.real();
+
+    for (std::size_t hidden = 0; hidden < legacy_hidden_count; ++hidden) {
+        for (std::size_t input = 0; input < brain_input_count; ++input) {
+            agent.brain[hidden * brain_input_count + input]
+                = legacy[hidden * brain_input_count + input];
+        }
+        agent.brain[hidden_bias_offset + hidden]
+            = legacy[legacy_hidden_bias_offset + hidden];
+    }
+    for (std::size_t output = 0; output < brain_output_count; ++output) {
+        for (std::size_t hidden = 0; hidden < legacy_hidden_count; ++hidden) {
+            agent.brain[hidden_output_weight_offset + output * brain_hidden_count + hidden]
+                = legacy[legacy_hidden_output_weight_offset
+                    + output * legacy_hidden_count + hidden];
+        }
+        agent.brain[output_bias_offset + output]
+            = legacy[legacy_output_bias_offset + output];
     }
     return agent;
 }
@@ -312,7 +400,7 @@ Simulation load_checkpoint(std::istream& input)
         }
     }
     const std::uint32_t version = reader.unsigned_32();
-    if (version != checkpoint_version) {
+    if (version != checkpoint_version && version != legacy_checkpoint_version) {
         throw std::runtime_error("unsupported EvoBrainBot checkpoint version");
     }
 
@@ -331,7 +419,9 @@ Simulation load_checkpoint(std::istream& input)
     const std::size_t agent_count = collection_size(reader.unsigned_64());
     snapshot.agents.reserve(agent_count);
     for (std::size_t index = 0; index < agent_count; ++index) {
-        snapshot.agents.push_back(read_agent(reader));
+        snapshot.agents.push_back(version == checkpoint_version
+                ? read_agent(reader)
+                : read_legacy_agent(reader));
     }
 
     const std::size_t food_count = collection_size(reader.unsigned_64());

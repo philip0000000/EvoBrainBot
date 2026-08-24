@@ -14,6 +14,12 @@ The current mechanics and configuration values are provisional. They establish
 a complete testable evolutionary loop and are expected to be refined after
 viewer and experiment tooling is available.
 
+See [`docs/brain-architecture.md`](docs/brain-architecture.md) for recurrent
+semantics, mutation rules, backend selection, and bounded benchmark commands.
+See [`docs/gpu-brain-optimization.md`](docs/gpu-brain-optimization.md) for the
+implemented CUDA optimizations, their maintenance constraints, and measured
+future optimization candidates.
+
 ## Goals
 
 * Simulate evolving autonomous agents
@@ -47,6 +53,11 @@ build the viewer and headless executable together:
 cmake --preset x64-release
 cmake --build out/build/x64-release
 ```
+
+An installed CUDA Toolkit is detected automatically and adds the optional GPU
+brain backend. Disable it explicitly with `-DEVOBRAIN_ENABLE_CUDA=OFF`, or
+override the default Turing-through-Hopper code targets with
+`-DEVOBRAIN_CUDA_ARCHITECTURES=<CMake architecture list>`.
 
 The x86 presets continue to build only the existing headless executable. SDL 3
 and Dear ImGui are fetched at pinned revisions during an x64 viewer configure;
@@ -110,8 +121,11 @@ no keyboard shortcut.
 
 The resizable right-side HUD shows the selected agent's identity, energy, age,
 generation, position, direction, diet, evolved RGB color, mutation rate,
-mutation strength, prior-tick bite damage, and 26-input/eight-hidden/three-output brain. Brain
-connections show evolved weight signs and relative magnitudes. Hover nodes or
+mutation strength, prior-tick bite damage, and 26-input/12-hidden/three-output brain. Brain
+connections show evolved weight signs and relative magnitudes. The first eight
+hidden neurons are active in founders, while four gray dormant neurons can be
+activated by evolution. Green recurrent connections carry previous-tick hidden
+values, and self-connections are drawn as loops. Hover nodes or
 connections for exact information, use **Reset brain view** to fit the graph,
 and expand the parameter table for numeric values. The canvas lays out arbitrary
 layer and node counts. The brain receives RGB and proximity from six literal
@@ -125,6 +139,10 @@ perception or brain activity. Each energy bar uses the reproduction threshold
 as its full reference level, not as a maximum-energy or health value.
 Selected-agent details are unavailable during Fast-forward and return after
 pausing if the selected stable ID survived.
+
+The paused **Brain backend** selector chooses CPU or an available CUDA GPU
+backend. Backend choice is transient execution configuration and is not saved
+in checkpoints.
 
 The **Show simulation debug** control and `D` shortcut draw the transient
 spatial-index grid without changing simulation state. Occupied cells are tinted,
@@ -162,6 +180,26 @@ frames per second. Simulation throughput must be measured separately with the
 headless executable because simulation speed is not a renderer acceptance
 measurement. See `docs/viewer-performance.md` for the recorded acceptance run.
 
+### Brain performance benchmark
+
+The brain-only benchmark uses deterministic seed 5 by default and accepts only
+the approved automatic tick counts of 100, 500, or 1,000:
+
+```powershell
+.\out\build\x64-release\evobrain_brain_benchmark.exe `
+    --backend gpu --population 3000 --ticks 100 --seed 5 --mix mixed `
+    --replacements-per-tick 1
+```
+
+Allowed populations are 250, 300, 2,000, 3,000, 5,000, and 30,000. The optional
+`--replacements-per-tick` count models equal-count birth/death churn and cannot
+exceed the selected population. Allowed mixes are
+`feed-forward-8`, `recurrent-8`, `recurrent-12`, and `mixed`. Runs longer than
+1,000 ticks are deliberately rejected. The 10,000-tick smoke/performance run is
+manual and is performed by the user, never by automated tests or normal CI.
+CPU and GPU results must be measured on the target hardware; small populations
+can remain faster on CPU because CUDA launch and transfer costs dominate.
+
 ## Run headless
 
 Start a new simulation with a random seed from 1 through 999. It runs until
@@ -175,6 +213,15 @@ Supply a seed and tick limit for a reproducible finite run:
 
 ```sh
 ./build/EvoBrainBot run --seed 1234 --ticks 1000
+```
+
+CPU is the default brain backend. Select an available CUDA build explicitly for
+new or resumed runs with `--brain-backend gpu`; unavailable GPU selection fails
+instead of silently falling back:
+
+```sh
+./build/EvoBrainBot run --seed 1234 --ticks 1000 --brain-backend cpu
+./build/EvoBrainBot resume state.evo --ticks 500 --brain-backend gpu
 ```
 
 With a Visual Studio generator on Windows, the executable is normally in the
@@ -210,6 +257,13 @@ is below 500. The cohort is capped by both ceilings; natural reproduction may
 later exceed them.
 
 ### Save and resume
+
+Project policy requires checkpoint writes to follow an explicit user save
+command only. The viewer follows this policy through paused Save and Save As
+actions, and brain backend changes and benchmarks never save. The headless
+`run` command is also an explicit save workflow: it saves when its requested
+tick limit is reached or when the user presses `Q` to stop and save. It does not
+write periodic or background checkpoints.
 
 Every successful `run` command saves the complete final simulation state when
 its tick limit or a graceful stop ends training. If its optional checkpoint
@@ -252,9 +306,11 @@ Enter. Non-interactive Linux or RunPod jobs can stop gracefully through
 accumulated statistics, entities, and random-generator state from the
 checkpoint.
 
-Checkpoints use version 3 of the binary format and preserve the complete
-predator-prey state. Older and other unsupported, incomplete, or invalid
-checkpoint files are rejected instead of being partially loaded.
+Checkpoints use version 4 of the binary format and preserve brain topology and
+recurrent runtime memory in addition to the complete predator-prey state.
+Version-3 fixed-brain checkpoints are upgraded into the compatible eight-active,
+four-dormant founder layout when loaded. Other unsupported, incomplete, or
+invalid checkpoint files are rejected instead of being partially loaded.
 
 Display the consolidated command help by running the executable without
 arguments or with `--help`:

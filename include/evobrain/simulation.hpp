@@ -1,6 +1,7 @@
 #pragma once
 
 #include "evobrain/brain.hpp"
+#include "evobrain/brain_backend.hpp"
 #include "evobrain/random.hpp"
 
 #include <cstddef>
@@ -9,6 +10,9 @@
 #include <vector>
 
 namespace evobrain {
+
+inline constexpr double minimum_mutation_rate = 0.0001;
+inline constexpr double minimum_mutation_strength = 0.001;
 
 struct Vec2 {
     double x = 0.0;
@@ -89,6 +93,8 @@ struct Agent {
     double mutation_strength = 0.1;
     double prior_bite_damage = 0.0;
     BrainParameters brain {};
+    BrainStructure brain_structure = founder_brain_structure();
+    BrainState brain_state;
     bool operator==(const Agent&) const = default;
 };
 
@@ -118,6 +124,7 @@ struct SimulationStats {
 struct SimulationExecutionConfig {
     // Zero automatically uses the available logical processors.
     std::size_t thread_count = 0;
+    BrainBackendKind brain_backend = BrainBackendKind::cpu;
 };
 
 // Reports non-persisted work and timing measurements from the latest tick.
@@ -130,6 +137,9 @@ struct SimulationDiagnostics {
     std::uint64_t bite_candidate_tests = 0;
     std::uint64_t bite_brute_force_tests = 0;
     double spatial_index_milliseconds = 0.0;
+    double sensing_milliseconds = 0.0;
+    double brain_milliseconds = 0.0;
+    // Retained as the aggregate compatibility measurement while callers migrate.
     double sensing_brain_milliseconds = 0.0;
     double movement_milliseconds = 0.0;
     double bite_milliseconds = 0.0;
@@ -187,6 +197,12 @@ public:
     // Returns transient performance measurements excluded from checkpoints.
     [[nodiscard]] const SimulationDiagnostics& diagnostics() const noexcept;
 
+    // Returns the transient execution backend, which is never checkpointed.
+    [[nodiscard]] BrainBackendKind brain_backend() const noexcept;
+
+    // Switches execution backend while preserving host-owned recurrent state.
+    void set_brain_backend(BrainBackendKind backend);
+
     // Returns every deterministic value required to resume exactly.
     [[nodiscard]] SimulationSnapshot snapshot() const;
 
@@ -231,6 +247,9 @@ private:
     // Evaluates all brains against the same completed previous state.
     [[nodiscard]] std::vector<AgentAction> evaluate_agent_actions();
 
+    // Rebuilds contiguous backend arrays only after population or genome changes.
+    [[nodiscard]] bool synchronize_brain_batch();
+
     // Applies movement and all attempt costs without resolving targets.
     void move_agents_and_charge_energy(std::span<const AgentAction> actions);
 
@@ -267,6 +286,15 @@ private:
     std::vector<Agent> agents_;
     std::vector<Food> food_;
     std::size_t execution_thread_count_ = 1;
+    BrainBackendKind brain_backend_ = BrainBackendKind::cpu;
+    bool brain_batch_dirty_ = true;
+    bool brain_backend_cache_reset_ = true;
+    std::vector<std::uint64_t> brain_ids_batch_;
+    std::vector<BrainParameters> brain_parameters_batch_;
+    std::vector<BrainStructure> brain_structures_batch_;
+    std::vector<BrainState> brain_states_batch_;
+    std::vector<BrainInputs> brain_inputs_batch_;
+    std::vector<BrainOutputs> brain_outputs_batch_;
     std::size_t spatial_columns_ = 1;
     std::size_t spatial_rows_ = 1;
     double spatial_cell_width_ = 1.0;

@@ -32,6 +32,38 @@ function(expect_command name expected_result expected_stdout expected_stderr)
     endif()
 endfunction()
 
+# Accepts either a real CUDA run or the required explicit unavailable error.
+function(expect_gpu_backend_behavior)
+    set(gpu_checkpoint "${CMAKE_CURRENT_BINARY_DIR}/gpu-backend-test.evo")
+    file(REMOVE "${gpu_checkpoint}")
+    execute_process(
+        COMMAND "${EVOBRAINBOT_EXECUTABLE}" run "${gpu_checkpoint}"
+            --seed 1 --ticks 0 --brain-backend gpu
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+        RESULT_VARIABLE actual_result
+        OUTPUT_VARIABLE actual_stdout
+        ERROR_VARIABLE actual_stderr
+    )
+    string(REPLACE "\r\n" "\n" actual_stdout "${actual_stdout}")
+    string(REPLACE "\r\n" "\n" actual_stderr "${actual_stderr}")
+    if("${actual_result}" STREQUAL "0")
+        if(NOT "${actual_stderr}" STREQUAL ""
+            OR NOT actual_stdout MATCHES "Brain backend: gpu\n"
+            OR NOT EXISTS "${gpu_checkpoint}")
+            message(FATAL_ERROR "available GPU backend did not complete a valid CLI run")
+        endif()
+    elseif("${actual_result}" STREQUAL "1")
+        if(NOT "${actual_stdout}" STREQUAL ""
+            OR NOT "${actual_stderr}" STREQUAL
+                "Error: requested brain backend is unavailable\n")
+            message(FATAL_ERROR "unavailable GPU backend did not fail explicitly")
+        endif()
+    else()
+        message(FATAL_ERROR "GPU backend CLI test returned ${actual_result}")
+    endif()
+    file(REMOVE "${gpu_checkpoint}")
+endfunction()
+
 # Checks a successful run whose automatically selected seed is intentionally variable.
 function(expect_generated_seed name expected_stdout)
     execute_process(
@@ -70,8 +102,8 @@ endfunction()
 string(CONCAT top_level_help
     "Usage:\n"
     "  EvoBrainBot [--help]\n"
-    "  EvoBrainBot run [<checkpoint>] [--seed <seed>] [--ticks <ticks>]\n"
-    "  EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>]\n"
+    "  EvoBrainBot run [<checkpoint>] [--seed <seed>] [--ticks <ticks>] [--brain-backend cpu|gpu]\n"
+    "  EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>] [--brain-backend cpu|gpu]\n"
     "\n"
     "Run starts a new simulation. Seed defaults to a random integer from 1 to 999.\n"
     "Without ticks, training continues until Q, q, SIGINT, or SIGTERM requests a stop.\n"
@@ -108,6 +140,7 @@ file(MAKE_DIRECTORY "${dotted_directory}")
 
 string(CONCAT default_one_tick_status
     "File: autosave.evo\n"
+    "Brain backend: cpu\n"
     "Seed: 1234\n"
     "Tick: 1\n"
     "Population: 30\n"
@@ -120,6 +153,7 @@ string(CONCAT default_one_tick_status
     "Agents eaten: 0\n")
 string(CONCAT default_two_tick_status
     "File: ${default_checkpoint_path}\n"
+    "Brain backend: cpu\n"
     "Seed: 1234\n"
     "Tick: 2\n"
     "Population: 30\n"
@@ -148,6 +182,7 @@ expect_command(read_resaved_default_checkpoint 0 "${default_two_tick_status}" ""
 
 string(CONCAT generated_seed_status
     "File: ${checkpoint_path}\n"
+    "Brain backend: cpu\n"
     "Seed: <generated>\n"
     "Tick: 0\n"
     "Population: 30\n"
@@ -163,6 +198,7 @@ expect_generated_seed(generated_seed "${generated_seed_status}"
 
 string(CONCAT normalized_path_status
     "File: ${normalized_checkpoint_path}\n"
+    "Brain backend: cpu\n"
     "Seed: 1234\n"
     "Tick: 0\n"
     "Population: 30\n"
@@ -200,6 +236,7 @@ endif()
 
 string(CONCAT maximum_seed_status
     "File: ${checkpoint_path}\n"
+    "Brain backend: cpu\n"
     "Seed: 18446744073709551615\n"
     "Tick: 0\n"
     "Population: 30\n"
@@ -215,6 +252,7 @@ expect_command(maximum_seed 0 "${maximum_seed_status}" ""
 
 string(CONCAT checkpoint_one_tick_status
     "File: ${checkpoint_path}\n"
+    "Brain backend: cpu\n"
     "Seed: 1234\n"
     "Tick: 1\n"
     "Population: 30\n"
@@ -265,6 +303,11 @@ expect_command(overflow_ticks 2 "" "Error: invalid unsigned integer value\n"
     run --seed 1 --ticks 18446744073709551616)
 expect_command(unknown_option 2 "" "Error: unknown option\n"
     run --seed 1 --ticks 1 --extra 2)
+expect_command(invalid_brain_backend 2 "" "Error: brain backend must be cpu or gpu\n"
+    run --seed 1 --ticks 0 --brain-backend other)
+expect_command(duplicate_brain_backend 2 "" "Error: duplicate option\n"
+    run --brain-backend cpu --brain-backend cpu --ticks 0)
+expect_gpu_backend_behavior()
 expect_command(removed_checkpoint_out 2 "" "Error: unknown option\n"
     run --seed 1 --ticks 1 --checkpoint-out other.evo)
 expect_command(duplicate_checkpoint 2 "" "Error: unexpected positional argument\n"

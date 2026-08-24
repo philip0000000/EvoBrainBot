@@ -67,6 +67,8 @@ struct SelectedAgentDetails {
     double mutation_strength = 0.0;
     double prior_bite_damage = 0.0;
     BrainParameters brain {};
+    BrainStructure brain_structure;
+    BrainState brain_state;
 
     bool operator==(const SelectedAgentDetails&) const = default;
 };
@@ -96,6 +98,8 @@ struct WorkerStatus {
     PlaybackState playback = PlaybackState::paused;
     int target_ticks_per_second = 60;
     double actual_ticks_per_second = 0.0;
+    BrainBackendKind brain_backend = BrainBackendKind::cpu;
+    bool gpu_backend_available = false;
     std::optional<std::uint64_t> selected_agent_id;
 
     bool operator==(const WorkerStatus&) const = default;
@@ -147,6 +151,9 @@ public:
 
     // Applies a target rate in the inclusive supported range of 1 to 1000.
     [[nodiscard]] OperationResult set_target_ticks_per_second(int value);
+
+    // Changes brain execution only while paused; checkpoint state is unaffected.
+    [[nodiscard]] OperationResult set_brain_backend(BrainBackendKind backend);
 
     // Selects one current stable agent ID, or clears viewer selection with null.
     void select_agent(std::optional<std::uint64_t> agent_id);

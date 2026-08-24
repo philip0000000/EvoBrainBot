@@ -1,5 +1,7 @@
 #include "evobrain/simulation.hpp"
 
+#include "parallel_executor.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -39,144 +41,13 @@ double elapsed_milliseconds(const Clock::time_point start,
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-// Returns a usable logical-processor count even when the platform reports none.
-std::size_t available_execution_threads() noexcept
-{
-    const unsigned int reported = std::thread::hardware_concurrency();
-    return reported == 0 ? 1 : static_cast<std::size_t>(reported);
-}
-
 // Resolves the requested worker count without exceeding available logical processors.
 std::size_t resolve_execution_threads(const SimulationExecutionConfig execution) noexcept
 {
-    const std::size_t available = available_execution_threads();
+    const std::size_t available = detail::available_execution_threads();
     return execution.thread_count == 0
         ? available
         : std::clamp(execution.thread_count, std::size_t {1}, available);
-}
-
-// Reuses a fixed standard-library worker set across simulations and tick calls.
-class ParallelExecutor {
-public:
-    ParallelExecutor()
-    {
-        const std::size_t worker_count = available_execution_threads() - 1;
-        workers_.reserve(worker_count);
-        for (std::size_t worker = 0; worker < worker_count; ++worker) {
-            workers_.emplace_back([this, worker] { worker_loop(worker); });
-        }
-    }
-
-    ~ParallelExecutor()
-    {
-        {
-            std::lock_guard lock(state_mutex_);
-            stopping_ = true;
-            ++generation_;
-        }
-        work_available_.notify_all();
-        for (std::thread& worker : workers_) {
-            if (worker.joinable()) worker.join();
-        }
-    }
-
-    ParallelExecutor(const ParallelExecutor&) = delete;
-    ParallelExecutor& operator=(const ParallelExecutor&) = delete;
-
-    // Runs independent indices with the caller participating as one worker.
-    template <typename Function>
-    void for_each_index(const std::size_t count, const std::size_t thread_count,
-        Function&& function)
-    {
-        if (count == 0) return;
-        const std::size_t participating_workers =
-            std::min({thread_count > 0 ? thread_count - 1 : 0, workers_.size(), count - 1});
-        if (participating_workers == 0) {
-            for (std::size_t index = 0; index < count; ++index) function(index);
-            return;
-        }
-
-        // Only one simulation publishes a job at a time; its world remains otherwise independent.
-        std::lock_guard invocation_lock(invocation_mutex_);
-        {
-            std::lock_guard state_lock(state_mutex_);
-            task_ = std::forward<Function>(function);
-            task_count_ = count;
-            next_index_.store(0, std::memory_order_relaxed);
-            active_worker_count_ = participating_workers;
-            unfinished_workers_ = participating_workers;
-            first_exception_ = nullptr;
-            ++generation_;
-        }
-        work_available_.notify_all();
-        run_available_indices();
-
-        std::unique_lock state_lock(state_mutex_);
-        work_completed_.wait(state_lock, [this] { return unfinished_workers_ == 0; });
-        const std::exception_ptr failure = first_exception_;
-        task_ = {};
-        state_lock.unlock();
-        if (failure) std::rethrow_exception(failure);
-    }
-
-private:
-    // Claims and evaluates remaining indices until the shared job is exhausted.
-    void run_available_indices()
-    {
-        for (;;) {
-            const std::size_t index = next_index_.fetch_add(1, std::memory_order_relaxed);
-            if (index >= task_count_) return;
-            try {
-                task_(index);
-            } catch (...) {
-                std::lock_guard lock(state_mutex_);
-                if (!first_exception_) first_exception_ = std::current_exception();
-            }
-        }
-    }
-
-    // Waits for job generations and participates only when selected for that job.
-    void worker_loop(const std::size_t worker)
-    {
-        std::size_t observed_generation = 0;
-        for (;;) {
-            std::unique_lock lock(state_mutex_);
-            work_available_.wait(lock, [this, &observed_generation] {
-                return stopping_ || generation_ != observed_generation;
-            });
-            if (stopping_) return;
-            observed_generation = generation_;
-            const bool participates = worker < active_worker_count_;
-            lock.unlock();
-            if (!participates) continue;
-
-            run_available_indices();
-            lock.lock();
-            --unfinished_workers_;
-            if (unfinished_workers_ == 0) work_completed_.notify_one();
-        }
-    }
-
-    std::mutex invocation_mutex_;
-    std::mutex state_mutex_;
-    std::condition_variable work_available_;
-    std::condition_variable work_completed_;
-    std::vector<std::thread> workers_;
-    std::function<void(std::size_t)> task_;
-    std::atomic<std::size_t> next_index_ {0};
-    std::size_t task_count_ = 0;
-    std::size_t active_worker_count_ = 0;
-    std::size_t unfinished_workers_ = 0;
-    std::size_t generation_ = 0;
-    std::exception_ptr first_exception_;
-    bool stopping_ = false;
-};
-
-// Returns the process-wide executor so ticks reuse worker threads instead of recreating them.
-ParallelExecutor& parallel_executor()
-{
-    static ParallelExecutor executor;
-    return executor;
 }
 
 void require_finite(const double value, const char* const name)
@@ -244,10 +115,10 @@ void validate_config(const SimulationConfig& config)
         || config.initial_brain_parameter_minimum > config.initial_brain_parameter_maximum
         || config.initial_brain_parameter_minimum < config.brain_parameter_minimum
         || config.initial_brain_parameter_maximum > config.brain_parameter_maximum
-        || config.founder_mutation_rate_minimum < 0.0
+        || config.founder_mutation_rate_minimum < minimum_mutation_rate
         || config.founder_mutation_rate_maximum > 1.0
         || config.founder_mutation_rate_minimum > config.founder_mutation_rate_maximum
-        || config.founder_mutation_strength_minimum < 0.0
+        || config.founder_mutation_strength_minimum < minimum_mutation_strength
         || config.founder_mutation_strength_maximum > 1.0
         || config.founder_mutation_strength_minimum > config.founder_mutation_strength_maximum
         || config.brain_mutation_scale < 0.0 || config.color_mutation_scale < 0.0
@@ -356,8 +227,9 @@ void validate_snapshot(const SimulationSnapshot& snapshot)
             || agent.color.red < 0.0 || agent.color.red > 1.0
             || agent.color.green < 0.0 || agent.color.green > 1.0
             || agent.color.blue < 0.0 || agent.color.blue > 1.0
-            || agent.mutation_rate < 0.0 || agent.mutation_rate > 1.0
-            || agent.mutation_strength < 0.0 || agent.mutation_strength > 1.0
+            || agent.mutation_rate < minimum_mutation_rate || agent.mutation_rate > 1.0
+            || agent.mutation_strength < minimum_mutation_strength
+            || agent.mutation_strength > 1.0
             || agent.prior_bite_damage < 0.0) {
             throw std::invalid_argument("snapshot contains an invalid agent");
         }
@@ -366,6 +238,46 @@ void validate_snapshot(const SimulationSnapshot& snapshot)
             if (parameter < snapshot.config.brain_parameter_minimum
                 || parameter > snapshot.config.brain_parameter_maximum) {
                 throw std::invalid_argument("snapshot brain parameter exceeds configured limits");
+            }
+        }
+        if (agent.brain_structure.founder_fast_path > 1) {
+            throw std::invalid_argument("snapshot brain has invalid fast-path state");
+        }
+        if (agent.brain_structure.founder_fast_path != 0
+            && agent.brain_structure != founder_brain_structure()) {
+            throw std::invalid_argument("snapshot brain has inconsistent fast-path topology");
+        }
+        for (const std::uint8_t active : agent.brain_structure.hidden_active) {
+            if (active > 1) throw std::invalid_argument("snapshot brain has invalid neuron state");
+        }
+        const auto validate_mask = [](const auto& mask) {
+            return std::ranges::all_of(mask, [](const std::uint8_t enabled) {
+                return enabled <= 1;
+            });
+        };
+        if (!validate_mask(agent.brain_structure.input_hidden_enabled)
+            || !validate_mask(agent.brain_structure.hidden_output_enabled)
+            || !validate_mask(agent.brain_structure.recurrent_enabled)) {
+            throw std::invalid_argument("snapshot brain has invalid connection state");
+        }
+        for (const double weight : agent.brain_structure.recurrent_weights) {
+            require_finite(weight, "recurrent brain parameter");
+            if (weight < snapshot.config.brain_parameter_minimum
+                || weight > snapshot.config.brain_parameter_maximum) {
+                throw std::invalid_argument(
+                    "snapshot recurrent parameter exceeds configured limits");
+            }
+        }
+        for (const double value : agent.brain_state.previous_hidden) {
+            require_finite(value, "previous recurrent brain state");
+            if (value < -1.0 || value > 1.0) {
+                throw std::invalid_argument("snapshot recurrent state exceeds activation range");
+            }
+        }
+        for (const double value : agent.brain_state.next_hidden) {
+            require_finite(value, "next recurrent brain state");
+            if (value < -1.0 || value > 1.0) {
+                throw std::invalid_argument("snapshot recurrent state exceeds activation range");
             }
         }
         maximum_agent_id = std::max(maximum_agent_id, agent.id);
@@ -397,9 +309,13 @@ void validate_snapshot(const SimulationSnapshot& snapshot)
 Simulation::Simulation(const SimulationConfig& config,
     const SimulationExecutionConfig execution)
     : config_(config), random_(config.seed),
-      execution_thread_count_(resolve_execution_threads(execution))
+      execution_thread_count_(resolve_execution_threads(execution)),
+      brain_backend_(execution.brain_backend)
 {
     validate_config(config_);
+    if (!brain_backend_available(brain_backend_)) {
+        throw std::runtime_error("requested brain backend is unavailable");
+    }
     configure_spatial_index();
     agents_.reserve(checked_size(config_.initial_population, "initial population"));
     food_.reserve(checked_size(config_.boosted_food_count, "boosted food count"));
@@ -424,14 +340,33 @@ Simulation::Simulation(SimulationSnapshot snapshot, RestoredSnapshotTag,
       introduced_agents_(snapshot.introduced_agents), deaths_(snapshot.deaths),
       agents_eaten_(snapshot.agents_eaten),
       agents_(std::move(snapshot.agents)), food_(std::move(snapshot.food)),
-      execution_thread_count_(resolve_execution_threads(execution))
+      execution_thread_count_(resolve_execution_threads(execution)),
+      brain_backend_(execution.brain_backend)
 {
+    if (!brain_backend_available(brain_backend_)) {
+        throw std::runtime_error("requested brain backend is unavailable");
+    }
     configure_spatial_index();
 }
 
 Simulation Simulation::from_snapshot(SimulationSnapshot snapshot,
     const SimulationExecutionConfig execution)
 {
+    // Old or externally produced values at zero are repaired so a lineage can mutate again.
+    snapshot.config.founder_mutation_rate_minimum = std::max(
+        snapshot.config.founder_mutation_rate_minimum, minimum_mutation_rate);
+    snapshot.config.founder_mutation_rate_maximum = std::max(
+        snapshot.config.founder_mutation_rate_maximum,
+        snapshot.config.founder_mutation_rate_minimum);
+    snapshot.config.founder_mutation_strength_minimum = std::max(
+        snapshot.config.founder_mutation_strength_minimum, minimum_mutation_strength);
+    snapshot.config.founder_mutation_strength_maximum = std::max(
+        snapshot.config.founder_mutation_strength_maximum,
+        snapshot.config.founder_mutation_strength_minimum);
+    for (Agent& agent : snapshot.agents) {
+        agent.mutation_rate = std::max(agent.mutation_rate, minimum_mutation_rate);
+        agent.mutation_strength = std::max(agent.mutation_strength, minimum_mutation_strength);
+    }
     validate_snapshot(snapshot);
     return Simulation(std::move(snapshot), RestoredSnapshotTag {}, execution);
 }
@@ -537,9 +472,47 @@ Agent Simulation::create_random_agent(const Diet diet)
         .mutation_strength = random_.uniform(config_.founder_mutation_strength_minimum,
             config_.founder_mutation_strength_maximum),
     };
-    for (double& parameter : agent.brain) {
-        parameter = random_.uniform(config_.initial_brain_parameter_minimum,
+    // Preserve the original 26-to-8-to-3 initialization order for founder behavior.
+    for (std::size_t hidden = 0; hidden < brain_founder_hidden_count; ++hidden) {
+        for (std::size_t input = 0; input < brain_input_count; ++input) {
+            agent.brain[hidden * brain_input_count + input] = random_.uniform(
+                config_.initial_brain_parameter_minimum,
+                config_.initial_brain_parameter_maximum);
+        }
+    }
+    for (std::size_t hidden = 0; hidden < brain_founder_hidden_count; ++hidden) {
+        agent.brain[hidden_bias_offset + hidden] = random_.uniform(
+            config_.initial_brain_parameter_minimum,
             config_.initial_brain_parameter_maximum);
+    }
+    for (std::size_t output = 0; output < brain_output_count; ++output) {
+        for (std::size_t hidden = 0; hidden < brain_founder_hidden_count; ++hidden) {
+            agent.brain[hidden_output_weight_offset + output * brain_hidden_count + hidden]
+                = random_.uniform(config_.initial_brain_parameter_minimum,
+                    config_.initial_brain_parameter_maximum);
+        }
+    }
+    for (std::size_t output = 0; output < brain_output_count; ++output) {
+        agent.brain[output_bias_offset + output] = random_.uniform(
+            config_.initial_brain_parameter_minimum,
+            config_.initial_brain_parameter_maximum);
+    }
+    // Dormant genes are initialized after the active founder network and remain disabled.
+    for (std::size_t hidden = brain_founder_hidden_count; hidden < brain_hidden_count;
+         ++hidden) {
+        for (std::size_t input = 0; input < brain_input_count; ++input) {
+            agent.brain[hidden * brain_input_count + input] = random_.uniform(
+                config_.initial_brain_parameter_minimum,
+                config_.initial_brain_parameter_maximum);
+        }
+        agent.brain[hidden_bias_offset + hidden] = random_.uniform(
+            config_.initial_brain_parameter_minimum,
+            config_.initial_brain_parameter_maximum);
+        for (std::size_t output = 0; output < brain_output_count; ++output) {
+            agent.brain[hidden_output_weight_offset + output * brain_hidden_count + hidden]
+                = random_.uniform(config_.initial_brain_parameter_minimum,
+                    config_.initial_brain_parameter_maximum);
+        }
     }
     return agent;
 }
@@ -620,8 +593,31 @@ BrainInputs Simulation::sense_agent(const Agent& observer,
     return inputs;
 }
 
+bool Simulation::synchronize_brain_batch()
+{
+    if (!brain_batch_dirty_ && brain_parameters_batch_.size() == agents_.size()) {
+        return false;
+    }
+
+    brain_parameters_batch_.resize(agents_.size());
+    brain_ids_batch_.resize(agents_.size());
+    brain_structures_batch_.resize(agents_.size());
+    brain_states_batch_.resize(agents_.size());
+    brain_inputs_batch_.resize(agents_.size());
+    brain_outputs_batch_.resize(agents_.size());
+    for (std::size_t index = 0; index < agents_.size(); ++index) {
+        brain_ids_batch_[index] = agents_[index].id;
+        brain_parameters_batch_[index] = agents_[index].brain;
+        brain_structures_batch_[index] = agents_[index].brain_structure;
+        brain_states_batch_[index] = agents_[index].brain_state;
+    }
+    brain_batch_dirty_ = false;
+    return true;
+}
+
 std::vector<Simulation::AgentAction> Simulation::evaluate_agent_actions()
 {
+    const bool brain_batch_rebuilt = synchronize_brain_batch();
     std::vector<AgentAction> actions(agents_.size());
     std::vector<std::uint64_t> candidate_tests(agents_.size(), 0);
     std::vector<std::uint64_t> brute_force_tests(agents_.size(), 0);
@@ -633,17 +629,16 @@ std::vector<Simulation::AgentAction> Simulation::evaluate_agent_actions()
         ? 1
         : std::min(execution_thread_count_, std::max<std::size_t>(2, agents_.size() / 16));
     diagnostics_.execution_threads = effective_threads;
-    parallel_executor().for_each_index(agents_.size(), effective_threads,
+    const Clock::time_point sensing_start = Clock::now();
+    detail::parallel_executor().for_each_index(agents_.size(), effective_threads,
         [&](const std::size_t index) {
             thread_local std::vector<std::size_t> agent_candidates;
             thread_local std::vector<std::size_t> food_candidates;
             collect_spatial_candidates(agents_[index].position, query_radius,
                 agent_candidates, food_candidates);
             const Agent& agent = agents_[index];
-            const BrainOutputs output = evaluate_brain(agent.brain,
-                sense_agent(agent, agent_candidates, food_candidates));
-            actions[index] = {.agent_id = agent.id, .turn = output.turn,
-                .move = output.move, .eat = output.eat >= config_.eat_threshold};
+            brain_inputs_batch_[index] = sense_agent(
+                agent, agent_candidates, food_candidates);
             const std::size_t other_candidates = agent_candidates.empty()
                 ? 0
                 : agent_candidates.size() - 1;
@@ -652,9 +647,33 @@ std::vector<Simulation::AgentAction> Simulation::evaluate_agent_actions()
             brute_force_tests[index] = static_cast<std::uint64_t>(vision_ray_count)
                 * static_cast<std::uint64_t>(agents_.size() - 1 + food_.size());
         });
+    const Clock::time_point brain_start = Clock::now();
+    diagnostics_.sensing_milliseconds = elapsed_milliseconds(sensing_start, brain_start);
+    evaluate_brain_batch(brain_backend_,
+        BrainBatch {
+            .agent_ids = brain_ids_batch_,
+            .parameters = brain_parameters_batch_,
+            .structures = brain_structures_batch_,
+            .states = brain_states_batch_,
+            .inputs = brain_inputs_batch_,
+            .outputs = brain_outputs_batch_,
+            .cache_identity = this,
+            .population_changed = brain_batch_rebuilt,
+            .state_changed = brain_backend_cache_reset_,
+            .reset_cache = brain_backend_cache_reset_,
+        },
+        execution_thread_count_);
+    brain_backend_cache_reset_ = false;
+    diagnostics_.brain_milliseconds = elapsed_milliseconds(brain_start, Clock::now());
+    diagnostics_.sensing_brain_milliseconds = diagnostics_.sensing_milliseconds
+        + diagnostics_.brain_milliseconds;
     diagnostics_.vision_candidate_tests = 0;
     diagnostics_.vision_brute_force_tests = 0;
     for (std::size_t index = 0; index < agents_.size(); ++index) {
+        agents_[index].brain_state = brain_states_batch_[index];
+        const BrainOutputs& output = brain_outputs_batch_[index];
+        actions[index] = {.agent_id = agents_[index].id, .turn = output.turn,
+            .move = output.move, .eat = output.eat >= config_.eat_threshold};
         diagnostics_.vision_candidate_tests += candidate_tests[index];
         diagnostics_.vision_brute_force_tests += brute_force_tests[index];
     }
@@ -683,6 +702,7 @@ void Simulation::remove_dead_agents()
 {
     const std::size_t before = agents_.size();
     std::erase_if(agents_, [](const Agent& agent) { return agent.energy <= 0.0; });
+    if (agents_.size() != before) brain_batch_dirty_ = true;
     deaths_ += static_cast<std::uint64_t>(before - agents_.size());
 }
 
@@ -807,6 +827,7 @@ void Simulation::resolve_bites(const std::span<const AgentAction> actions)
         ++agents_eaten_;
         return true;
     });
+    if (agents_.size() != agents_before) brain_batch_dirty_ = true;
     deaths_ += static_cast<std::uint64_t>(agents_before - agents_.size());
     std::erase_if(food_, [](const Food& item) { return item.energy <= 0.0; });
 }
@@ -837,6 +858,7 @@ void Simulation::reproduce_eligible_agents()
         child.age = 0;
         child.generation = parent.generation + 1;
         child.prior_bite_damage = 0.0;
+        child.brain_state = {};
         const double parent_rate = parent.mutation_rate;
         const double parent_strength = parent.mutation_strength;
         const auto mutate = [&](double& gene, const double minimum, const double maximum,
@@ -846,32 +868,88 @@ void Simulation::reproduce_eligible_agents()
                     * category_scale, minimum, maximum);
             }
         };
-        // Fixed gene order is part of seeded determinism; diet is intentionally absent.
+        // Fixed gene and topology order is part of seeded determinism; diet is absent.
         for (double& parameter : child.brain) {
             mutate(parameter, config_.brain_parameter_minimum,
                 config_.brain_parameter_maximum, config_.brain_mutation_scale);
         }
+        for (std::size_t hidden = brain_founder_hidden_count;
+             hidden < brain_hidden_count; ++hidden) {
+            if (child.brain_structure.hidden_active[hidden] != 0
+                || random_.unit_interval() >= parent_rate) {
+                continue;
+            }
+            child.brain_structure.hidden_active[hidden] = 1;
+            child.brain_structure.founder_fast_path = 0;
+            const std::size_t input = random_.bounded(
+                static_cast<std::uint32_t>(brain_input_count));
+            const std::size_t output = random_.bounded(
+                static_cast<std::uint32_t>(brain_output_count));
+            const std::size_t incoming = hidden * brain_input_count + input;
+            const std::size_t outgoing = output * brain_hidden_count + hidden;
+            child.brain_structure.input_hidden_enabled[incoming] = 1;
+            child.brain_structure.hidden_output_enabled[outgoing] = 1;
+            const double connection_scale = parent_strength * config_.brain_mutation_scale;
+            child.brain[incoming] = std::clamp(random_.uniform(-connection_scale,
+                connection_scale), config_.brain_parameter_minimum,
+                config_.brain_parameter_maximum);
+            child.brain[hidden_output_weight_offset + outgoing] = std::clamp(
+                random_.uniform(-connection_scale, connection_scale),
+                config_.brain_parameter_minimum, config_.brain_parameter_maximum);
+        }
+        for (std::size_t target = 0; target < brain_hidden_count; ++target) {
+            if (child.brain_structure.hidden_active[target] == 0) continue;
+            for (std::size_t source = 0; source < brain_hidden_count; ++source) {
+                if (child.brain_structure.hidden_active[source] == 0) continue;
+                const std::size_t connection = target * brain_hidden_count + source;
+                if (child.brain_structure.recurrent_enabled[connection] == 0) {
+                    if (random_.unit_interval() >= parent_rate) continue;
+                    child.brain_structure.recurrent_enabled[connection] = 1;
+                    child.brain_structure.founder_fast_path = 0;
+                    const double connection_scale =
+                        parent_strength * config_.brain_mutation_scale;
+                    child.brain_structure.recurrent_weights[connection] = std::clamp(
+                        random_.uniform(-connection_scale, connection_scale),
+                        config_.brain_parameter_minimum,
+                        config_.brain_parameter_maximum);
+                } else {
+                    mutate(child.brain_structure.recurrent_weights[connection],
+                        config_.brain_parameter_minimum,
+                        config_.brain_parameter_maximum,
+                        config_.brain_mutation_scale);
+                }
+            }
+        }
         mutate(child.color.red, 0.0, 1.0, config_.color_mutation_scale);
         mutate(child.color.green, 0.0, 1.0, config_.color_mutation_scale);
         mutate(child.color.blue, 0.0, 1.0, config_.color_mutation_scale);
-        mutate(child.mutation_rate, 0.0, 1.0, config_.mutation_rate_mutation_scale);
-        mutate(child.mutation_strength, 0.0, 1.0,
+        mutate(child.mutation_rate, minimum_mutation_rate, 1.0,
+            config_.mutation_rate_mutation_scale);
+        mutate(child.mutation_strength, minimum_mutation_strength, 1.0,
             config_.mutation_strength_mutation_scale);
+        child.mutation_rate = std::max(child.mutation_rate, minimum_mutation_rate);
+        child.mutation_strength = std::max(child.mutation_strength,
+            minimum_mutation_strength);
         children.push_back(child);
         ++births_;
     }
-    agents_.insert(agents_.end(), children.begin(), children.end());
+    if (!children.empty()) {
+        agents_.insert(agents_.end(), children.begin(), children.end());
+        brain_batch_dirty_ = true;
+    }
 }
 
 void Simulation::restore_minimum_population()
 {
     const std::size_t minimum = checked_size(config_.minimum_population, "minimum population");
+    const std::size_t before = agents_.size();
     // Restoration follows the founder rule so it cannot bypass the prey-gated
     // carnivore introduction policy.
     while (agents_.size() < minimum) {
         agents_.push_back(create_random_agent(Diet::herbivore));
         ++introduced_agents_;
     }
+    if (agents_.size() != before) brain_batch_dirty_ = true;
 }
 
 void Simulation::introduce_carnivores_if_supported()
@@ -898,6 +976,7 @@ void Simulation::introduce_carnivores_if_supported()
         agents_.push_back(create_random_agent(Diet::carnivore));
         ++introduced_agents_;
     }
+    if (count != 0) brain_batch_dirty_ = true;
 }
 
 void Simulation::replenish_food_if_allowed()
@@ -940,8 +1019,8 @@ void Simulation::tick()
         elapsed_milliseconds(first_index_start, sensing_start);
     const std::vector<AgentAction> actions = evaluate_agent_actions();
     const Clock::time_point movement_start = Clock::now();
-    diagnostics_.sensing_brain_milliseconds =
-        elapsed_milliseconds(sensing_start, movement_start);
+    diagnostics_.sensing_brain_milliseconds = diagnostics_.sensing_milliseconds
+        + diagnostics_.brain_milliseconds;
     move_agents_and_charge_energy(actions);
     remove_dead_agents();
     const Clock::time_point second_index_start = Clock::now();
@@ -980,6 +1059,19 @@ const SimulationConfig& Simulation::config() const noexcept { return config_; }
 std::span<const Agent> Simulation::agents() const noexcept { return agents_; }
 std::span<const Food> Simulation::food() const noexcept { return food_; }
 const SimulationDiagnostics& Simulation::diagnostics() const noexcept { return diagnostics_; }
+BrainBackendKind Simulation::brain_backend() const noexcept { return brain_backend_; }
+
+void Simulation::set_brain_backend(const BrainBackendKind backend)
+{
+    if (!brain_backend_available(backend)) {
+        throw std::runtime_error("requested brain backend is unavailable");
+    }
+    if (brain_backend_ == backend) return;
+    brain_backend_ = backend;
+    // A new backend must receive the complete genome and current recurrent state.
+    brain_batch_dirty_ = true;
+    brain_backend_cache_reset_ = true;
+}
 
 SimulationStats Simulation::stats() const noexcept
 {
