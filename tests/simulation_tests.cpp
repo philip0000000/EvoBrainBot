@@ -173,8 +173,20 @@ void test_spatial_index_and_thread_determinism()
 
 void test_brain_topology_and_ranges()
 {
-    expect_equal(evobrain::brain_parameter_count, std::size_t {243},
-        "26-to-8-to-3 brain has 243 parameters");
+    expect_equal(evobrain::brain_parameter_count, std::size_t {363},
+        "26-to-12-to-3 brain has 363 feed-forward parameters");
+    const evobrain::BrainStructure founder = evobrain::founder_brain_structure();
+    expect_equal(std::ranges::count(founder.hidden_active, std::uint8_t {1}),
+        std::ptrdiff_t {8}, "founder has eight active hidden neurons");
+    expect_true(std::ranges::all_of(
+            founder.hidden_active.begin() + evobrain::brain_founder_hidden_count,
+            founder.hidden_active.end(), [](const std::uint8_t active) {
+                return active == 0;
+            }),
+        "founder has four dormant hidden neurons");
+    expect_true(std::ranges::none_of(founder.recurrent_enabled,
+            [](const std::uint8_t enabled) { return enabled != 0; }),
+        "founder starts without recurrent connections");
     evobrain::BrainParameters brain {};
     brain[evobrain::hidden_bias_offset] = 1.0;
     brain[evobrain::hidden_output_weight_offset] = 2.0;
@@ -184,6 +196,283 @@ void test_brain_topology_and_ranges()
     expect_equal(output.turn, 1.0, "turn clamps to one");
     expect_equal(output.move, 0.0, "Move maps negative clamp to zero");
     expect_equal(output.eat, 1.0, "eat maps positive clamp to one");
+    evobrain::BrainStructure general_founder = founder;
+    general_founder.founder_fast_path = 0;
+    evobrain::BrainState general_state;
+    expect_equal(evobrain::evaluate_brain(brain, general_founder, general_state, {}),
+        output, "general CPU path agrees with the founder fast path");
+
+    evobrain::BrainStructure memory_structure;
+    memory_structure.hidden_active[0] = 1;
+    memory_structure.input_hidden_enabled[24] = 1;
+    memory_structure.hidden_output_enabled[0] = 1;
+    memory_structure.recurrent_enabled[0] = 1;
+    memory_structure.recurrent_weights[0] = 1.0;
+    evobrain::BrainParameters memory_brain {};
+    memory_brain[24] = 1.0;
+    memory_brain[evobrain::hidden_output_weight_offset] = 1.0;
+    evobrain::BrainState memory_state;
+    expect_equal(evobrain::evaluate_brain(memory_brain, memory_structure,
+                     memory_state, {.energy = 1.0}).turn,
+        1.0, "recurrent brain receives a current input");
+    expect_equal(evobrain::evaluate_brain(memory_brain, memory_structure,
+                     memory_state, {}).turn,
+        1.0, "self-connection retains the previous tick value");
+
+    evobrain::BrainStructure pulse_structure;
+    for (std::size_t hidden = 0; hidden < 3; ++hidden) {
+        pulse_structure.hidden_active[hidden] = 1;
+    }
+    pulse_structure.recurrent_enabled[1 * evobrain::brain_hidden_count] = 1;
+    pulse_structure.recurrent_weights[1 * evobrain::brain_hidden_count] = 1.0;
+    pulse_structure.recurrent_enabled[2 * evobrain::brain_hidden_count + 1] = 1;
+    pulse_structure.recurrent_weights[2 * evobrain::brain_hidden_count + 1] = 1.0;
+    pulse_structure.recurrent_enabled[2] = 1;
+    pulse_structure.recurrent_weights[2] = 1.0;
+    pulse_structure.hidden_output_enabled[0] = 1;
+    evobrain::BrainParameters pulse_brain {};
+    pulse_brain[evobrain::hidden_output_weight_offset] = 1.0;
+    evobrain::BrainState pulse_state;
+    pulse_state.previous_hidden[0] = 1.0;
+    expect_equal(evobrain::evaluate_brain(
+                     pulse_brain, pulse_structure, pulse_state, {}).turn,
+        0.0, "pulse advances from the first node");
+    expect_equal(evobrain::evaluate_brain(
+                     pulse_brain, pulse_structure, pulse_state, {}).turn,
+        0.0, "pulse advances through the second node");
+    expect_equal(evobrain::evaluate_brain(
+                     pulse_brain, pulse_structure, pulse_state, {}).turn,
+        1.0, "three-node recurrent ring returns a pulse to its output node");
+}
+
+// Verifies CUDA matches CPU semantics closely and repeats exactly on one device.
+void test_cuda_brain_backend_agreement()
+{
+    if (!evobrain::brain_backend_available(evobrain::BrainBackendKind::gpu)) return;
+
+    constexpr std::size_t population = 96;
+    constexpr std::size_t ticks = 25;
+    evobrain::Pcg32 random(5);
+    std::vector<evobrain::BrainParameters> parameters(population);
+    std::vector<std::uint64_t> agent_ids(population);
+    std::vector<evobrain::BrainStructure> structures(population);
+    std::vector<evobrain::BrainState> initial_states(population);
+    std::vector<evobrain::BrainInputs> inputs(population);
+    for (std::size_t agent = 0; agent < population; ++agent) {
+        agent_ids[agent] = static_cast<std::uint64_t>(agent + 1);
+        for (double& parameter : parameters[agent]) {
+            parameter = random.uniform(-0.75, 0.75);
+        }
+        evobrain::BrainStructure& structure = structures[agent];
+        structure = evobrain::founder_brain_structure();
+        if (agent % 3 != 0) {
+            structure.founder_fast_path = 0;
+            const std::size_t active_count = agent % 3 == 1
+                ? evobrain::brain_founder_hidden_count
+                : evobrain::brain_hidden_count;
+            for (std::size_t hidden = 0; hidden < active_count; ++hidden) {
+                structure.hidden_active[hidden] = 1;
+                for (std::size_t input = 0; input < evobrain::brain_input_count; ++input) {
+                    const std::size_t connection = hidden * evobrain::brain_input_count + input;
+                    structure.input_hidden_enabled[connection]
+                        = (connection + agent) % 5 != 0 ? 1 : 0;
+                }
+                for (std::size_t output = 0; output < evobrain::brain_output_count; ++output) {
+                    structure.hidden_output_enabled[
+                        output * evobrain::brain_hidden_count + hidden]
+                        = (output + hidden + agent) % 4 != 0 ? 1 : 0;
+                }
+                initial_states[agent].previous_hidden[hidden]
+                    = random.uniform(-0.5, 0.5);
+                initial_states[agent].next_hidden[hidden]
+                    = initial_states[agent].previous_hidden[hidden];
+            }
+            for (std::size_t target = 0; target < active_count; ++target) {
+                for (std::size_t source = 0; source < active_count; ++source) {
+                    const std::size_t connection
+                        = target * evobrain::brain_hidden_count + source;
+                    if ((target + source + agent) % 3 == 0) {
+                        structure.recurrent_enabled[connection] = 1;
+                        structure.recurrent_weights[connection]
+                            = random.uniform(-0.5, 0.5);
+                    }
+                }
+            }
+        }
+        for (evobrain::VisionRayInputs& ray : inputs[agent].vision) {
+            ray = {.red = random.unit_interval(), .green = random.unit_interval(),
+                .blue = random.unit_interval(), .proximity = random.unit_interval()};
+        }
+        inputs[agent].energy = random.unit_interval();
+        inputs[agent].damage = random.unit_interval();
+    }
+
+    std::vector<evobrain::BrainState> cpu_states = initial_states;
+    std::vector<evobrain::BrainState> gpu_states = initial_states;
+    std::vector<evobrain::BrainOutputs> cpu_outputs(population);
+    std::vector<evobrain::BrainOutputs> gpu_outputs(population);
+    for (std::size_t tick = 0; tick < ticks; ++tick) {
+        evobrain::evaluate_brain_batch(evobrain::BrainBackendKind::cpu,
+            {.agent_ids = agent_ids, .parameters = parameters,
+                .structures = structures, .states = cpu_states,
+                .inputs = inputs, .outputs = cpu_outputs,
+                .cache_identity = parameters.data(),
+                .population_changed = tick == 0, .state_changed = tick == 0,
+                .reset_cache = tick == 0},
+            1);
+        evobrain::evaluate_brain_batch(evobrain::BrainBackendKind::gpu,
+            {.agent_ids = agent_ids, .parameters = parameters,
+                .structures = structures, .states = gpu_states,
+                .inputs = inputs, .outputs = gpu_outputs,
+                .cache_identity = parameters.data(),
+                .population_changed = tick == 0, .state_changed = tick == 0,
+                .reset_cache = tick == 0},
+            1);
+        for (std::size_t agent = 0; agent < population; ++agent) {
+            expect_near(gpu_outputs[agent].turn, cpu_outputs[agent].turn, 1e-12,
+                "CUDA turn output agrees with CPU");
+            expect_near(gpu_outputs[agent].move, cpu_outputs[agent].move, 1e-12,
+                "CUDA move output agrees with CPU");
+            expect_near(gpu_outputs[agent].eat, cpu_outputs[agent].eat, 1e-12,
+                "CUDA eat output agrees with CPU");
+            for (std::size_t hidden = 0; hidden < evobrain::brain_hidden_count; ++hidden) {
+                expect_near(gpu_states[agent].previous_hidden[hidden],
+                    cpu_states[agent].previous_hidden[hidden], 1e-12,
+                    "CUDA recurrent state agrees with CPU");
+            }
+        }
+    }
+
+    const std::vector<evobrain::BrainState> first_gpu_states = gpu_states;
+    const std::vector<evobrain::BrainOutputs> first_gpu_outputs = gpu_outputs;
+    gpu_states = initial_states;
+    for (std::size_t tick = 0; tick < ticks; ++tick) {
+        evobrain::evaluate_brain_batch(evobrain::BrainBackendKind::gpu,
+            {.agent_ids = agent_ids, .parameters = parameters,
+                .structures = structures, .states = gpu_states,
+                .inputs = inputs, .outputs = gpu_outputs,
+                .cache_identity = parameters.data(),
+                .population_changed = tick == 0, .state_changed = tick == 0,
+                .reset_cache = tick == 0},
+            1);
+    }
+    expect_equal(gpu_outputs, first_gpu_outputs,
+        "repeated CUDA evaluation produces identical outputs");
+    expect_equal(gpu_states, first_gpu_states,
+        "repeated CUDA evaluation produces identical recurrent state");
+
+    // One death, host reordering, and one birth must update only identity-mapped slots.
+    constexpr std::size_t removed = 7;
+    agent_ids.erase(agent_ids.begin() + removed);
+    parameters.erase(parameters.begin() + removed);
+    structures.erase(structures.begin() + removed);
+    cpu_states.erase(cpu_states.begin() + removed);
+    gpu_states.erase(gpu_states.begin() + removed);
+    inputs.erase(inputs.begin() + removed);
+    cpu_outputs.erase(cpu_outputs.begin() + removed);
+    gpu_outputs.erase(gpu_outputs.begin() + removed);
+    constexpr std::size_t reordered_a = 2;
+    constexpr std::size_t reordered_b = 41;
+    std::swap(agent_ids[reordered_a], agent_ids[reordered_b]);
+    std::swap(parameters[reordered_a], parameters[reordered_b]);
+    std::swap(structures[reordered_a], structures[reordered_b]);
+    std::swap(cpu_states[reordered_a], cpu_states[reordered_b]);
+    std::swap(gpu_states[reordered_a], gpu_states[reordered_b]);
+    std::swap(inputs[reordered_a], inputs[reordered_b]);
+    std::swap(cpu_outputs[reordered_a], cpu_outputs[reordered_b]);
+    std::swap(gpu_outputs[reordered_a], gpu_outputs[reordered_b]);
+
+    evobrain::BrainParameters newborn_parameters {};
+    for (double& parameter : newborn_parameters) parameter = random.uniform(-0.75, 0.75);
+    parameters.push_back(newborn_parameters);
+    structures.push_back(evobrain::founder_brain_structure());
+    cpu_states.emplace_back();
+    gpu_states.emplace_back();
+    inputs.push_back(inputs.front());
+    cpu_outputs.emplace_back();
+    gpu_outputs.emplace_back();
+    agent_ids.push_back(10'000);
+
+    evobrain::evaluate_brain_batch(evobrain::BrainBackendKind::cpu,
+        {.agent_ids = agent_ids, .parameters = parameters,
+            .structures = structures, .states = cpu_states,
+            .inputs = inputs, .outputs = cpu_outputs,
+            .cache_identity = parameters.data(), .population_changed = true,
+            .state_changed = false, .reset_cache = false},
+        1);
+    evobrain::evaluate_brain_batch(evobrain::BrainBackendKind::gpu,
+        {.agent_ids = agent_ids, .parameters = parameters,
+            .structures = structures, .states = gpu_states,
+            .inputs = inputs, .outputs = gpu_outputs,
+            .cache_identity = parameters.data(), .population_changed = true,
+            .state_changed = false, .reset_cache = false},
+        1);
+    for (std::size_t agent = 0; agent < agent_ids.size(); ++agent) {
+        expect_near(gpu_outputs[agent].turn, cpu_outputs[agent].turn, 1e-12,
+            "incremental CUDA slot turn output agrees with CPU");
+        expect_near(gpu_outputs[agent].move, cpu_outputs[agent].move, 1e-12,
+            "incremental CUDA slot move output agrees with CPU");
+        expect_near(gpu_outputs[agent].eat, cpu_outputs[agent].eat, 1e-12,
+            "incremental CUDA slot eat output agrees with CPU");
+        for (std::size_t hidden = 0; hidden < evobrain::brain_hidden_count; ++hidden) {
+            expect_near(gpu_states[agent].previous_hidden[hidden],
+                cpu_states[agent].previous_hidden[hidden], 1e-12,
+                "incremental CUDA slot state agrees with CPU");
+        }
+    }
+}
+
+// Verifies bounded full simulations remain numerically close across backends.
+void test_simulation_backend_agreement()
+{
+    if (!evobrain::brain_backend_available(evobrain::BrainBackendKind::gpu)) return;
+
+    const evobrain::SimulationConfig config {.seed = 5};
+    evobrain::Simulation cpu(config,
+        evobrain::SimulationExecutionConfig {
+            .thread_count = 1, .brain_backend = evobrain::BrainBackendKind::cpu});
+    evobrain::Simulation gpu(config,
+        evobrain::SimulationExecutionConfig {
+            .thread_count = 1, .brain_backend = evobrain::BrainBackendKind::gpu});
+    cpu.run_for(100);
+    gpu.run_for(100);
+    expect_equal(gpu.stats(), cpu.stats(),
+        "CPU and CUDA simulations retain identical discrete statistics");
+
+    const evobrain::SimulationSnapshot cpu_snapshot = cpu.snapshot();
+    const evobrain::SimulationSnapshot gpu_snapshot = gpu.snapshot();
+    expect_equal(gpu_snapshot.random_state, cpu_snapshot.random_state,
+        "CPU and CUDA simulations retain identical random state");
+    expect_equal(gpu_snapshot.agents.size(), cpu_snapshot.agents.size(),
+        "CPU and CUDA simulations retain identical agent count");
+    expect_equal(gpu_snapshot.food.size(), cpu_snapshot.food.size(),
+        "CPU and CUDA simulations retain identical food count");
+    for (std::size_t index = 0; index < cpu_snapshot.agents.size(); ++index) {
+        const evobrain::Agent& cpu_agent = cpu_snapshot.agents[index];
+        const evobrain::Agent& gpu_agent = gpu_snapshot.agents[index];
+        expect_equal(gpu_agent.id, cpu_agent.id,
+            "CPU and CUDA simulations retain agent identity");
+        expect_equal(gpu_agent.age, cpu_agent.age,
+            "CPU and CUDA simulations retain agent age");
+        expect_equal(gpu_agent.brain, cpu_agent.brain,
+            "CPU and CUDA simulations retain agent genomes");
+        expect_equal(gpu_agent.brain_structure, cpu_agent.brain_structure,
+            "CPU and CUDA simulations retain agent topology");
+        expect_near(gpu_agent.position.x, cpu_agent.position.x, 1e-12,
+            "CUDA agent x position remains close to CPU");
+        expect_near(gpu_agent.position.y, cpu_agent.position.y, 1e-12,
+            "CUDA agent y position remains close to CPU");
+        expect_near(gpu_agent.direction, cpu_agent.direction, 1e-12,
+            "CUDA agent direction remains close to CPU");
+        expect_near(gpu_agent.energy, cpu_agent.energy, 1e-12,
+            "CUDA agent energy remains close to CPU");
+    }
+    for (std::size_t index = 0; index < cpu_snapshot.food.size(); ++index) {
+        expect_equal(gpu_snapshot.food[index].id, cpu_snapshot.food[index].id,
+            "CPU and CUDA simulations retain food identity");
+        expect_near(gpu_snapshot.food[index].energy, cpu_snapshot.food[index].energy,
+            1e-12, "CUDA food energy remains close to CPU");
+    }
 }
 
 void test_configuration_and_founders()
@@ -235,6 +524,18 @@ void test_configuration_and_founders()
     }
     expect_equal(first.stats().herbivores + first.stats().carnivores,
         first.stats().population, "diet counts sum to population");
+
+    evobrain::SimulationSnapshot floored_snapshot = first.snapshot();
+    floored_snapshot.agents.front().mutation_rate = 0.0;
+    floored_snapshot.agents.front().mutation_strength = 0.0;
+    const evobrain::Simulation floored =
+        evobrain::Simulation::from_snapshot(std::move(floored_snapshot));
+    expect_equal(floored.agents().front().mutation_rate,
+        evobrain::minimum_mutation_rate,
+        "restored zero mutation rate is clamped to the positive floor");
+    expect_equal(floored.agents().front().mutation_strength,
+        evobrain::minimum_mutation_strength,
+        "restored zero mutation strength is clamped to the positive floor");
 }
 
 void test_literal_ray_first_hit_and_wrap()
@@ -364,6 +665,30 @@ void test_inherited_mutation_and_reproduction_geometry()
         "child faces opposite parent");
     expect_equal(child.age, std::uint64_t {0}, "new child has age zero");
     expect_near(child.prior_bite_damage, 0.0, 0.0, "new child damage starts clear");
+    expect_true(std::ranges::all_of(child.brain_state.previous_hidden,
+            [](const double value) { return value == 0.0; }),
+        "new child does not inherit recurrent memory");
+    expect_equal(std::ranges::count(child.brain_structure.hidden_active,
+                     std::uint8_t {1}),
+        std::ptrdiff_t {12}, "full-rate mutation activates every dormant neuron");
+    for (std::size_t hidden = evobrain::brain_founder_hidden_count;
+         hidden < evobrain::brain_hidden_count; ++hidden) {
+        const bool has_incoming = std::ranges::any_of(
+            child.brain_structure.input_hidden_enabled.begin()
+                + static_cast<std::ptrdiff_t>(hidden * evobrain::brain_input_count),
+            child.brain_structure.input_hidden_enabled.begin()
+                + static_cast<std::ptrdiff_t>((hidden + 1) * evobrain::brain_input_count),
+            [](const std::uint8_t enabled) { return enabled != 0; });
+        bool has_outgoing = false;
+        for (std::size_t output = 0; output < evobrain::brain_output_count; ++output) {
+            has_outgoing = has_outgoing
+                || child.brain_structure.hidden_output_enabled[
+                    output * evobrain::brain_hidden_count + hidden]
+                    != 0;
+        }
+        expect_true(has_incoming && has_outgoing,
+            "activated dormant neuron receives an incoming and outgoing connection");
+    }
     expect_true(std::abs(child.color.red - parent.color.red) <= 0.025
             && std::abs(child.mutation_rate - parent.mutation_rate) <= 0.002
             && std::abs(child.mutation_strength - parent.mutation_strength) <= 0.01,
@@ -575,6 +900,8 @@ int main()
     test_random_and_fixed_tick_determinism();
     test_spatial_index_and_thread_determinism();
     test_brain_topology_and_ranges();
+    test_cuda_brain_backend_agreement();
+    test_simulation_backend_agreement();
     test_configuration_and_founders();
     test_literal_ray_first_hit_and_wrap();
     test_configured_world_movement_wrap();

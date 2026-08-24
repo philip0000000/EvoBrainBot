@@ -42,8 +42,10 @@ broad phase for vision and mouth targeting. Exact ray-circle intersections,
 wrapping, physical overlap checks, layer order, and stable-ID tie-breaking remain
 the authoritative narrow-phase rules.
 
-Agent sensing and brain evaluation can run concurrently because every worker
-reads the same completed world state and writes to a predetermined action slot.
+Agent sensing and brain evaluation are separate batched phases. Sensing workers
+read the same completed world state and write predetermined input slots; the
+selected brain backend then consumes contiguous parameter, topology, state, and
+input arrays and writes one output slot per agent.
 Movement, bite aggregation, births, deaths, mutation, food updates, and
 population introduction remain ordered deterministic CPU phases.
 
@@ -51,10 +53,12 @@ The spatial index, execution thread count, timings, and diagnostic counters are
 not evolutionary state and are not stored in checkpoints. The viewer's `D`
 overlay exposes these diagnostics without changing simulation behavior.
 
-The internal calculations of each brain have not yet been converted into a
-specialized batched matrix implementation. The current optimization evaluates
-multiple independent agents concurrently while preserving the existing brain
-mathematics.
+The CPU backend has a specialized dense 26-to-8-to-3 founder path and a general
+path for recurrent brains or nine through 12 active hidden neurons. Both use
+the same clamped-linear semantics, and recurrent edges read only the completed
+previous-tick buffer. Genome arrays are rebuilt only after population or genome
+changes; recurrent state and per-tick inputs/outputs use reusable contiguous
+buffers.
 
 ## Optimization order
 
@@ -115,15 +119,29 @@ without requiring one ecosystem to contain an extreme number of agents. This
 model also supports comparisons between seeds, brain structures, mutation rules,
 and ecosystem parameters.
 
+## Current brain-backend decisions
+
+- CPU is the default and remains available without a CUDA toolkit or NVIDIA GPU.
+- CUDA is the optional GPU technology; explicit unavailable GPU selection is an error.
+- Brain calculations use double precision without fast-math.
+- Repeated runs are deterministic within one backend. Direct CPU/GPU evaluation
+  must agree within an absolute or relative tolerance of `1e-12`; long evolutionary
+  trajectories can still diverge after permitted floating-point differences affect
+  later branching.
+- Backend choice and diagnostics are transient and absent from checkpoints.
+- Sensing, action resolution, and lifecycle remain on the CPU in this issue.
+- CUDA assigns stable agent IDs to persistent fixed-stride device slots. Deaths
+  release slots and newborns update only reused slots through one packed scatter
+  batch, while unchanged structure-of-arrays genomes remain resident. One
+  per-tick synchronization covers inputs, outputs, and recurrent state.
+
 ## Decisions intentionally left open
 
 Profiling and future requirements must decide:
 
 - the first population or brain size that justifies a GPU backend;
-- whether to use CUDA or another compute technology;
-- whether world state should remain GPU-resident across ticks;
-- whether CPU and GPU runs must be bit-for-bit identical or only reproducible
-  within the same backend;
+- the measured CPU/GPU crossover population on target hardware;
+- whether non-brain world state should ever become GPU-resident;
 - how multiple simulations should be scheduled and compared;
 - whether later environmental fields belong in the ecosystem model.
 

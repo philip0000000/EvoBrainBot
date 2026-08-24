@@ -72,6 +72,8 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
                 .mutation_strength = agent.mutation_strength,
                 .prior_bite_damage = agent.prior_bite_damage,
                 .brain = agent.brain,
+                .brain_structure = agent.brain_structure,
+                .brain_state = agent.brain_state,
             };
         }
     }
@@ -221,6 +223,10 @@ public:
             .playback = playback_,
             .target_ticks_per_second = target_ticks_per_second_,
             .actual_ticks_per_second = actual_ticks_per_second_,
+            .brain_backend = simulation_.has_value()
+                ? simulation_->brain_backend()
+                : BrainBackendKind::cpu,
+            .gpu_backend_available = brain_backend_available(BrainBackendKind::gpu),
             .selected_agent_id = selected_agent_id_,
         };
     }
@@ -529,6 +535,31 @@ OperationResult SimulationWorker::set_target_ticks_per_second(const int value)
         impl_->target_ticks_per_second_ = value;
         impl_->publish();
         result = OperationResult {.succeeded = true};
+    });
+    return result;
+}
+
+OperationResult SimulationWorker::set_brain_backend(const BrainBackendKind backend)
+{
+    OperationResult result;
+    impl_->dispatch([&] {
+        if (!impl_->simulation_) {
+            result = OperationResult {.summary = "No checkpoint is loaded."};
+            return;
+        }
+        if (impl_->playback_ != PlaybackState::paused) {
+            result = OperationResult {
+                .summary = "Pause the simulation before changing brain backend.",
+            };
+            return;
+        }
+        try {
+            impl_->simulation_->set_brain_backend(backend);
+            impl_->publish();
+            result = OperationResult {.succeeded = true};
+        } catch (const std::exception& error) {
+            result = failed_operation("The brain backend could not be changed.", error);
+        }
     });
     return result;
 }

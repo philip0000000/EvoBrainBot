@@ -83,6 +83,14 @@ void test_checkpoint_round_trip()
 {
     evobrain::Simulation original(checkpoint_config(991));
     original.run_for(37);
+    evobrain::SimulationSnapshot recurrent_snapshot = original.snapshot();
+    evobrain::Agent& recurrent = recurrent_snapshot.agents.front();
+    recurrent.brain_structure.founder_fast_path = 0;
+    recurrent.brain_structure.recurrent_enabled[0] = 1;
+    recurrent.brain_structure.recurrent_weights[0] = 0.75;
+    recurrent.brain_state.previous_hidden[0] = 0.5;
+    recurrent.brain_state.next_hidden[0] = 0.5;
+    original = evobrain::Simulation::from_snapshot(std::move(recurrent_snapshot));
     evobrain::Simulation restored = load_saved_checkpoint(saved_checkpoint(original));
 
     expect_checkpoint(original.snapshot() == restored.snapshot(),

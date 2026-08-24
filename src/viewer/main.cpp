@@ -100,6 +100,7 @@ struct ViewerUiResult {
     bool exit_discard = false;
     bool exit_cancel = false;
     std::optional<int> target_ticks_per_second;
+    std::optional<evobrain::BrainBackendKind> brain_backend;
     bool selection_requested = false;
     std::optional<std::uint64_t> selected_agent_id;
     evobrain::viewer::CameraViewport world_viewport;
@@ -119,17 +120,20 @@ struct BrainNodeView {
     std::size_t layer = 0;
     std::string_view name;
     std::optional<double> bias;
+    bool active = true;
 };
 
 struct BrainConnectionView {
     std::size_t source = 0;
     std::size_t target = 0;
     double weight = 0.0;
+    bool recurrent = false;
 };
 
 struct BrainViewState {
     ImVec2 pan {0.0F, 0.0F};
     float zoom = 1.0F;
+    float canvas_height = 270.0F;
     std::optional<std::uint64_t> agent_id;
     bool reset_requested = true;
 };
@@ -378,7 +382,6 @@ void draw_brain_canvas(
     const std::span<const BrainConnectionView> connections,
     BrainViewState& state)
 {
-    constexpr float canvas_height = 270.0F;
     constexpr float horizontal_spacing = 210.0F;
     constexpr float vertical_spacing = 72.0F;
     if (layers.empty() || nodes.empty()) {
@@ -392,7 +395,7 @@ void draw_brain_canvas(
     ImGui::TextDisabled("Wheel: zoom  Middle-drag: pan");
 
     ImGui::BeginChild(
-        "Brain canvas", ImVec2(0.0F, canvas_height), ImGuiChildFlags_Borders,
+        "Brain canvas", ImVec2(0.0F, state.canvas_height), ImGuiChildFlags_Borders,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 canvas_position = ImGui::GetCursorScreenPos();
     const ImVec2 available = ImGui::GetContentRegionAvail();
@@ -481,6 +484,7 @@ void draw_brain_canvas(
         }
     }
     maximum_magnitude = std::max(maximum_magnitude, 1e-12);
+    const float node_radius = std::clamp(7.0F * state.zoom, 4.0F, 11.0F);
     std::optional<std::size_t> hovered_connection;
     float hovered_connection_distance = std::numeric_limits<float>::infinity();
     for (std::size_t index = 0; index < connections.size(); ++index) {
@@ -491,21 +495,39 @@ void draw_brain_canvas(
         const float strength = static_cast<float>(
             std::abs(connection.weight) / maximum_magnitude);
         const float thickness = 1.0F + strength * 4.0F;
-        const ImU32 color = connection.weight > 1e-9
-            ? IM_COL32(64, 156, 255, 220)
-            : connection.weight < -1e-9
-                ? IM_COL32(255, 112, 72, 220)
-                : IM_COL32(140, 140, 140, 150);
-        draw_list->AddLine(
-            screen_positions[connection.source],
-            screen_positions[connection.target],
-            color,
-            thickness);
-        if (hovered) {
-            const float distance = distance_to_segment_squared(
-                io.MousePos,
+        const ImU32 color = connection.recurrent
+            ? IM_COL32(86, 210, 138, 220)
+            : connection.weight > 1e-9
+                ? IM_COL32(64, 156, 255, 220)
+                : connection.weight < -1e-9
+                    ? IM_COL32(255, 112, 72, 220)
+                    : IM_COL32(140, 140, 140, 150);
+        if (connection.source == connection.target) {
+            draw_list->AddCircle(screen_positions[connection.source],
+                node_radius + 6.0F, color, 20, thickness);
+        } else {
+            draw_list->AddLine(
                 screen_positions[connection.source],
-                screen_positions[connection.target]);
+                screen_positions[connection.target],
+                color,
+                thickness);
+        }
+        if (hovered) {
+            float distance = 0.0F;
+            if (connection.source == connection.target) {
+                const float delta_x = io.MousePos.x - screen_positions[connection.source].x;
+                const float delta_y = io.MousePos.y - screen_positions[connection.source].y;
+                const float loop_radius = node_radius + 6.0F;
+                // Self-connections are rings, so hover distance is measured to the ring.
+                const float radial_distance = std::sqrt(delta_x * delta_x + delta_y * delta_y);
+                const float ring_distance = radial_distance - loop_radius;
+                distance = ring_distance * ring_distance;
+            } else {
+                distance = distance_to_segment_squared(
+                    io.MousePos,
+                    screen_positions[connection.source],
+                    screen_positions[connection.target]);
+            }
             const float hover_radius = std::max(5.0F, thickness + 2.0F);
             if (distance <= hover_radius * hover_radius
                 && distance < hovered_connection_distance) {
@@ -515,7 +537,6 @@ void draw_brain_canvas(
         }
     }
 
-    const float node_radius = std::clamp(7.0F * state.zoom, 4.0F, 11.0F);
     std::optional<std::size_t> hovered_node;
     for (std::size_t index = 0; index < nodes.size(); ++index) {
         const BrainNodeView& node = nodes[index];
@@ -524,7 +545,9 @@ void draw_brain_canvas(
         if (node.layer >= layers.size()) {
             continue;
         }
-        const ImU32 node_color = node.layer == 0
+        const ImU32 node_color = !node.active
+            ? IM_COL32(95, 95, 105, 180)
+            : node.layer == 0
             ? IM_COL32(170, 190, 215, 255)
             : node.layer + 1 == layers.size()
                 ? IM_COL32(245, 202, 92, 255)
@@ -595,7 +618,36 @@ void draw_brain_canvas(
     ImGui::EndChild();
 }
 
-// Adapts the fixed 26-to-8-to-3 brain to the topology-independent canvas.
+// Draws a horizontal resize handle and updates the brain diagram height.
+void draw_brain_canvas_splitter(const float minimum_height,
+    const float maximum_height, float& canvas_height)
+{
+    constexpr float splitter_height = 8.0F;
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("Brain canvas splitter",
+        ImVec2(ImGui::GetContentRegionAvail().x, splitter_height));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+    if (hovered || active) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    }
+    if (active) {
+        // Moving the separator down grows the diagram above it.
+        canvas_height = std::clamp(canvas_height + ImGui::GetIO().MouseDelta.y,
+            minimum_height, maximum_height);
+    }
+    const ImU32 color = ImGui::GetColorU32(active
+            ? ImGuiCol_SeparatorActive
+            : hovered ? ImGuiCol_SeparatorHovered : ImGuiCol_Separator);
+    const float center_y = start.y + splitter_height * 0.5F;
+    ImGui::GetWindowDrawList()->AddLine(
+        ImVec2(start.x, center_y),
+        ImVec2(start.x + ImGui::GetContentRegionAvail().x, center_y),
+        color,
+        1.0F);
+}
+
+// Adapts one evolvable 26-to-12-to-3 brain to the topology-independent canvas.
 void draw_brain_map(
     const evobrain::viewer::SelectedAgentDetails& agent,
     BrainViewState& state)
@@ -617,6 +669,7 @@ void draw_brain_map(
     constexpr std::array<std::string_view, evobrain::brain_hidden_count> hidden_names {{
         "Hidden 1", "Hidden 2", "Hidden 3", "Hidden 4",
         "Hidden 5", "Hidden 6", "Hidden 7", "Hidden 8",
+        "Hidden 9", "Hidden 10", "Hidden 11", "Hidden 12",
     }};
     constexpr std::array<std::string_view, evobrain::brain_output_count> output_names {{
         "Turn", "Move", "Eat",
@@ -627,7 +680,8 @@ void draw_brain_map(
     for (const std::string_view name : input_names) nodes.push_back({.layer = 0, .name = name});
     for (std::size_t hidden = 0; hidden < evobrain::brain_hidden_count; ++hidden) {
         nodes.push_back({.layer = 1, .name = hidden_names[hidden],
-            .bias = agent.brain[evobrain::hidden_bias_offset + hidden]});
+            .bias = agent.brain[evobrain::hidden_bias_offset + hidden],
+            .active = agent.brain_structure.hidden_active[hidden] != 0});
     }
     for (std::size_t output = 0; output < evobrain::brain_output_count; ++output) {
         nodes.push_back({.layer = 2, .name = output_names[output],
@@ -635,42 +689,77 @@ void draw_brain_map(
     }
     std::vector<BrainConnectionView> connections;
     connections.reserve(evobrain::input_hidden_weight_count
-        + evobrain::brain_hidden_count * evobrain::brain_output_count);
+        + evobrain::brain_hidden_count * evobrain::brain_output_count
+        + evobrain::recurrent_weight_count);
     for (std::size_t hidden = 0; hidden < evobrain::brain_hidden_count; ++hidden) {
         for (std::size_t input = 0; input < evobrain::brain_input_count; ++input) {
-            connections.push_back({.source = input,
-                .target = evobrain::brain_input_count + hidden,
-                .weight = agent.brain[hidden * evobrain::brain_input_count + input]});
+            const std::size_t connection = hidden * evobrain::brain_input_count + input;
+            if (agent.brain_structure.input_hidden_enabled[connection] != 0) {
+                connections.push_back({.source = input,
+                    .target = evobrain::brain_input_count + hidden,
+                    .weight = agent.brain[connection]});
+            }
         }
     }
     for (std::size_t output = 0; output < evobrain::brain_output_count; ++output) {
         for (std::size_t hidden = 0; hidden < evobrain::brain_hidden_count; ++hidden) {
-            connections.push_back({.source = evobrain::brain_input_count + hidden,
-                .target = evobrain::brain_input_count + evobrain::brain_hidden_count + output,
-                .weight = agent.brain[evobrain::hidden_output_weight_offset
-                    + output * evobrain::brain_hidden_count + hidden]});
+            const std::size_t connection = output * evobrain::brain_hidden_count + hidden;
+            if (agent.brain_structure.hidden_output_enabled[connection] != 0) {
+                connections.push_back({.source = evobrain::brain_input_count + hidden,
+                    .target = evobrain::brain_input_count
+                        + evobrain::brain_hidden_count + output,
+                    .weight = agent.brain[
+                        evobrain::hidden_output_weight_offset + connection]});
+            }
+        }
+    }
+    for (std::size_t target = 0; target < evobrain::brain_hidden_count; ++target) {
+        for (std::size_t source = 0; source < evobrain::brain_hidden_count; ++source) {
+            const std::size_t connection = target * evobrain::brain_hidden_count + source;
+            if (agent.brain_structure.recurrent_enabled[connection] != 0) {
+                connections.push_back({
+                    .source = evobrain::brain_input_count + source,
+                    .target = evobrain::brain_input_count + target,
+                    .weight = agent.brain_structure.recurrent_weights[connection],
+                    .recurrent = true,
+                });
+            }
         }
     }
     if (state.agent_id != agent.id) {
         state.agent_id = agent.id;
         state.reset_requested = true;
     }
+    constexpr float minimum_canvas_height = 140.0F;
+    constexpr float reserved_details_height = 220.0F;
+    const float maximum_canvas_height = std::max(minimum_canvas_height,
+        ImGui::GetContentRegionAvail().y - reserved_details_height);
+    state.canvas_height = std::clamp(
+        state.canvas_height, minimum_canvas_height, maximum_canvas_height);
     draw_brain_canvas(layers, nodes, connections, state);
+    draw_brain_canvas_splitter(
+        minimum_canvas_height, maximum_canvas_height, state.canvas_height);
 
     ImGui::TextColored(ImVec4(0.25F, 0.61F, 1.0F, 1.0F), "Positive weight");
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1.0F, 0.44F, 0.28F, 1.0F), "Negative weight");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.34F, 0.82F, 0.54F, 1.0F),
+        "Recurrent (previous tick)");
+    ImGui::SameLine();
+    ImGui::TextDisabled("Dormant nodes are gray");
     if (ImGui::CollapsingHeader(
             "Exact brain parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::BeginChild(
             "Exact brain parameters table", ImVec2(0.0F, 155.0F),
             ImGuiChildFlags_Borders);
-        if (ImGui::BeginTable("Brain weights", 3,
+        if (ImGui::BeginTable("Brain weights", 4,
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
                     | ImGuiTableFlags_SizingStretchSame)) {
             ImGui::TableSetupColumn("From");
             ImGui::TableSetupColumn("To");
             ImGui::TableSetupColumn("Value");
+            ImGui::TableSetupColumn("Type");
             ImGui::TableHeadersRow();
             for (const BrainConnectionView& connection : connections) {
                 ImGui::TableNextRow();
@@ -689,6 +778,10 @@ void draw_brain_map(
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("%.17g", connection.weight);
                 }
+                ImGui::TableSetColumnIndex(3);
+                ImGui::TextUnformatted(connection.recurrent
+                        ? "Previous tick"
+                        : "Current tick");
             }
             for (const BrainNodeView& node : nodes) {
                 if (!node.bias) {
@@ -704,6 +797,8 @@ void draw_brain_map(
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("%.17g", *node.bias);
                 }
+                ImGui::TableSetColumnIndex(3);
+                ImGui::TextUnformatted(node.active ? "Active" : "Dormant");
             }
             ImGui::EndTable();
         }
@@ -835,6 +930,25 @@ ViewerUiResult draw_viewer_shell(
         result.target_ticks_per_second = target_tps_edit;
     }
     ImGui::SameLine();
+    ImGui::BeginDisabled(!status.has_simulation || !paused);
+    const char* backend_preview = status.brain_backend == evobrain::BrainBackendKind::gpu
+        ? "GPU (CUDA)"
+        : "CPU";
+    if (ImGui::BeginCombo("Brain backend", backend_preview)) {
+        if (ImGui::Selectable("CPU",
+                status.brain_backend == evobrain::BrainBackendKind::cpu)) {
+            result.brain_backend = evobrain::BrainBackendKind::cpu;
+        }
+        ImGui::BeginDisabled(!status.gpu_backend_available);
+        if (ImGui::Selectable("GPU (CUDA)",
+                status.brain_backend == evobrain::BrainBackendKind::gpu)) {
+            result.brain_backend = evobrain::BrainBackendKind::gpu;
+        }
+        ImGui::EndDisabled();
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
     const bool reset_requested = ImGui::Button("Reset view");
     if (!target_tps_validation.empty()) {
         ImGui::TextColored(
@@ -942,8 +1056,10 @@ ViewerUiResult draw_viewer_shell(
                 static_cast<unsigned long long>(diagnostics.execution_threads));
             ImGui::Text("Tick: %.3f ms", diagnostics.total_milliseconds);
             ImGui::Text("Spatial index: %.3f ms", diagnostics.spatial_index_milliseconds);
-            ImGui::Text("Sensing + brains: %.3f ms",
-                diagnostics.sensing_brain_milliseconds);
+            ImGui::Text("Sensing: %.3f ms", diagnostics.sensing_milliseconds);
+            ImGui::Text("Brains (%s): %.3f ms",
+                evobrain::brain_backend_name(status.brain_backend).data(),
+                diagnostics.brain_milliseconds);
             ImGui::Text("Movement: %.3f ms", diagnostics.movement_milliseconds);
             ImGui::Text("Bites: %.3f ms", diagnostics.bite_milliseconds);
             ImGui::Text("Lifecycle: %.3f ms", diagnostics.lifecycle_milliseconds);
@@ -1457,6 +1573,10 @@ int run_viewer()
                 target_tps_edit = worker.status().target_ticks_per_second;
                 first_frame = true;
             }
+        }
+        if (ui.brain_backend) {
+            show_operation_error(worker.set_brain_backend(*ui.brain_backend));
+            status = worker.status();
         }
 
         const bool save_requested = ui.request_save || shortcut_save;
