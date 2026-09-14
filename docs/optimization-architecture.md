@@ -54,7 +54,7 @@ not evolutionary state and are not stored in checkpoints. The viewer's `D`
 overlay exposes these diagnostics without changing simulation behavior.
 
 The CPU backend has a specialized dense 28-to-8-to-3 founder path and a general
-path for recurrent brains or nine through 12 active hidden neurons. Both use
+path for recurrent brains or nine through 16 active hidden neurons. Both use
 the same clamped-linear semantics, and recurrent edges read only the completed
 previous-tick buffer. Genome arrays are rebuilt only after population or genome
 changes; recurrent state and per-tick inputs/outputs use reusable contiguous

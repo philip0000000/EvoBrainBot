@@ -128,7 +128,7 @@ to this hardware and workload; RunPod targets must be measured independently.
 
 ## Checkpoints and saving
 
-Checkpoint version 6 stores expanded genomes, ecological traits, oxygen, and
+Checkpoint version 16 stores expanded genomes, ecological traits, oxygen, and
 recurrent state but not backend choice, derived terrain, daylight, or diagnostics.
 Older checkpoint versions are intentionally unsupported.
 
