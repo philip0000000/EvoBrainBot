@@ -35,8 +35,12 @@ constexpr Color heading_color {0.04F, 0.22F, 0.48F, 1.0F};
 constexpr Color food_color {static_cast<float>(plant_food_color.red),
     static_cast<float>(plant_food_color.green),
     static_cast<float>(plant_food_color.blue), 1.0F};
-constexpr Color herbivore_marker {0.10F, 0.85F, 0.22F, 1.0F};
-constexpr Color carnivore_marker {0.92F, 0.12F, 0.08F, 1.0F};
+constexpr Color sparse_land {0.43F, 0.24F, 0.10F, 1.0F};
+constexpr Color fertile_land {0.12F, 0.55F, 0.18F, 1.0F};
+constexpr Color sparse_water {0.01F, 0.03F, 0.08F, 1.0F};
+constexpr Color fertile_water {0.25F, 0.68F, 0.92F, 1.0F};
+constexpr Color rock_fill {0.58F, 0.58F, 0.58F, 1.0F};
+constexpr Color rock_outline {0.31F, 0.31F, 0.31F, 1.0F};
 constexpr Color eye_geometry {0.18F, 0.72F, 0.95F, 0.32F};
 constexpr Color eye_position {0.05F, 0.35F, 0.72F, 1.0F};
 constexpr Color mouth_position {0.95F, 0.20F, 0.12F, 1.0F};
@@ -295,7 +299,8 @@ bool WorldRenderer::prepare(
     const std::size_t debug_shape_estimate = snapshot != nullptr && options.show_debug
         ? snapshot->diagnostics.spatial_columns + snapshot->diagnostics.spatial_rows + 256
         : 0;
-    instances.reserve(entity_count + debug_shape_estimate + 16);
+    instances.reserve(entity_count + debug_shape_estimate
+        + (snapshot == nullptr ? 0 : snapshot->terrain.size() * 2) + 16);
 
     const auto add_screen_shape = [&](const float center_x,
                                       const float center_y,
@@ -370,6 +375,36 @@ bool WorldRenderer::prepare(
         outer.maximum_x, outer.maximum_y, outer_fill);
     add_world_rectangle(0.0, 0.0,
         camera.world_width(), camera.world_height(), world_fill);
+    if (snapshot != nullptr) {
+        const auto terrain_color = [&](const TerrainCell& cell) {
+            const Color sparse = cell.medium == TerrainMedium::water
+                ? sparse_water : sparse_land;
+            const Color fertile = cell.medium == TerrainMedium::water
+                ? fertile_water : fertile_land;
+            const float fertility = static_cast<float>(cell.fertility);
+            const float illumination = static_cast<float>(
+                0.38 + 0.62 * snapshot->light_level);
+            return Color {
+                (sparse.red + (fertile.red - sparse.red) * fertility) * illumination,
+                (sparse.green + (fertile.green - sparse.green) * fertility) * illumination,
+                (sparse.blue + (fertile.blue - sparse.blue) * fertility) * illumination,
+                1.0F};
+        };
+        for (const TerrainCell& cell : snapshot->terrain) {
+            add_world_rectangle(cell.position.x, cell.position.y,
+                cell.position.x + cell.width, cell.position.y + cell.height,
+                terrain_color(cell));
+            if (!cell.rock) continue;
+            add_world_rectangle(cell.position.x, cell.position.y,
+                cell.position.x + cell.width, cell.position.y + cell.height,
+                rock_outline);
+            const double inset_x = cell.width * 0.10;
+            const double inset_y = cell.height * 0.10;
+            add_world_rectangle(cell.position.x + inset_x, cell.position.y + inset_y,
+                cell.position.x + cell.width - inset_x,
+                cell.position.y + cell.height - inset_y, rock_fill);
+        }
+    }
     add_boundary(outer.minimum_x, outer.minimum_y,
         outer.maximum_x, outer.maximum_y, outer_boundary, 1.0F);
     add_boundary(0.0, 0.0,
@@ -596,12 +631,6 @@ bool WorldRenderer::prepare(
                         add_screen_shape(filled_center_x, center_y, filled_half_width,
                             bar_half_height, 0.0F, energy_fill, rectangle_shape);
                     }
-                    const float marker_radius = std::max(1.5F, agent_radius * 0.32F);
-                    add_screen_shape(center_x - agent_radius * 0.60F,
-                        static_cast<float>(copies.centers[index].y) + agent_radius * 0.60F,
-                        marker_radius, marker_radius, 0.0F,
-                        agent.diet == Diet::herbivore ? herbivore_marker : carnivore_marker,
-                        circle_shape);
                 }
             }
 

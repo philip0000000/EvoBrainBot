@@ -7,8 +7,8 @@ EvoBrainBot is an artificial-life simulation where autonomous agents evolve beha
 Early development.
 
 The project currently provides a deterministic headless simulation and a basic
-Windows viewer. Agents sense food, move, spend energy, eat, die, reproduce, and
-inherit mutated brain parameters.
+Windows viewer. Agents sense their surroundings, move, breathe, spend energy,
+eat plants or other agents, die, reproduce, and inherit mutated brains and traits.
 
 The current mechanics and configuration values are provisional. They establish
 a complete testable evolutionary loop and are expected to be refined after
@@ -120,25 +120,34 @@ through 1000 ticks per second. Save As is available from the File menu and has
 no keyboard shortcut.
 
 The resizable right-side HUD shows the selected agent's identity, energy, age,
-generation, position, direction, diet, evolved RGB color, mutation rate,
-mutation strength, prior-tick bite damage, and 26-input/12-hidden/three-output brain. Brain
+generation, position, direction, carnivore tendency, a readable lung-adaptation
+classification, exact water adaptation, oxygen, rock contact, evolved RGB color,
+brain mutation rate and strength, trait mutation rate, prior-tick
+bite damage, and 28-input/16-hidden/three-output brain. Brain
 connections show evolved weight signs and relative magnitudes. The first eight
-hidden neurons are active in founders, while four gray dormant neurons can be
+hidden neurons are active in founders, while eight gray dormant neurons can be
 activated by evolution. Green recurrent connections carry previous-tick hidden
 values, and self-connections are drawn as loops. Hover nodes or
 connections for exact information, use **Reset brain view** to fit the graph,
 and expand the parameter table for numeric values. The canvas lays out arbitrary
 layer and node counts. The brain receives RGB and proximity from six literal
-finite-range eye rays plus energy and prior-tick bite damage, and outputs turn,
-move, and eat decisions. It shows structure and weights, not live brain
-activity. The **Show agent information** control and `I` shortcut add energy
-bars and green herbivore or red carnivore markers beside visible agents. For
+finite-range eye rays plus energy, prior-tick bite damage, oxygen reserve, and
+rock contact, and outputs turn, move, and eat decisions. It shows structure and
+weights, not live brain activity. The **Show agent information** control and `I`
+shortcut add energy bars beside visible agents. For
 the selected agent it also draws both eye positions, all six maximum-length eye
 rays, and the mouth point; these overlays show geometry rather than current
 perception or brain activity. Each energy bar uses the reproduction threshold
 as its full reference level, not as a maximum-energy or health value.
 Selected-agent details are unavailable during Fast-forward and return after
 pausing if the selected stable ID survived.
+
+The viewer renders fertility as a continuous terrain gradient: land changes
+from brown to green and water from very dark navy to light blue. Wetland land
+and water patches share their region's fertility. Rocks remain medium-light grey
+with a darker outline, and the global day/night value changes terrain brightness.
+These ground colors are observer aids only; agent vision sees grey rocks but not
+terrain medium, fertility colors, or the rendered light level.
 
 The paused **Brain backend** selector chooses CPU or an available CUDA GPU
 backend. Backend choice is transient execution configuration and is not saved
@@ -194,7 +203,7 @@ the approved automatic tick counts of 100, 500, or 1,000:
 Allowed populations are 250, 300, 2,000, 3,000, 5,000, and 30,000. The optional
 `--replacements-per-tick` count models equal-count birth/death churn and cannot
 exceed the selected population. Allowed mixes are
-`feed-forward-8`, `recurrent-8`, `recurrent-12`, and `mixed`. Runs longer than
+`feed-forward-8`, `recurrent-8`, `recurrent-16`, and `mixed`. Runs longer than
 1,000 ticks are deliberately rejected. The 10,000-tick smoke/performance run is
 manual and is performed by the user, never by automated tests or normal CI.
 CPU and GPU results must be measured on the target hardware; small populations
@@ -215,6 +224,15 @@ Supply a seed and tick limit for a reproducible finite run:
 ./build/EvoBrainBot run --seed 1234 --ticks 1000
 ```
 
+Choose a size for a new world with `--world-size small|medium|large`:
+
+```sh
+./build/EvoBrainBot run medium.evo --world-size medium --seed 1234 --ticks 1000
+```
+
+Omitting the option selects small. `resume` rejects this option and restores the
+saved size and explicit population/food settings without rescaling them.
+
 CPU is the default brain backend. Select an available CUDA build explicitly for
 new or resumed runs with `--brain-backend gpu`; unavailable GPU selection fails
 instead of silently falling back:
@@ -232,29 +250,20 @@ selected configuration directory:
 ```
 
 An attached terminal displays the checkpoint filename, selected seed, completed
-ticks, total, herbivore, and carnivore populations, food, reproduction births,
-random agent introductions, deaths, and agents killed through eating. `Q` or
+ticks, total population, food, reproduction births, random agent introductions,
+deaths, and agents killed through eating. `Q` or
 `q` stops a finite run early as well as stopping an indefinite run. The final
 status is printed after the checkpoint is saved.
 
-### Plant-food recovery
+### Simulation feature inventory
 
-New simulations place 30 herbivore founders and 1,000 full-energy plant-food
-items in a 2.5 by 2.5 toroidal world. Below 200 living agents, the simulation
-spawns toward a ceiling of 1,000 food items. From 200 through 499 agents, the
-ceiling is 500 items. At 500 agents or more, no new food is spawned. At most
-five whole food items are added per completed tick, and crossing into a higher
-population band never deletes excess food.
+See [Simulation features](docs/simulation-features.md) for separate world and agent
+tables, generation frequencies and calculations, inherited traits, diet energy,
+and population/food settings.
 
-Every 100 completed ticks, one global regrowth pulse adds 0.025 energy to each
-surviving food item, clamped to the configured maximum of 0.25. These initial
-balance values are provisional and may change after smoke testing.
-
-Ordinary population-floor founders are always herbivores. Every 500 completed
-ticks, the simulation may introduce up to 15 random carnivore founders when at
-least 200 herbivores exist, fewer than 30 carnivores exist, and total population
-is below 500. The cohort is capped by both ceilings; natural reproduction may
-later exceed them.
+Update that document whenever a simulation feature, ability, trait, sensor,
+resource, generation rule, or lifecycle rule is added, removed, or materially
+changed. Console options and viewer-only presentation are excluded.
 
 ### Save and resume
 
@@ -306,11 +315,12 @@ Enter. Non-interactive Linux or RunPod jobs can stop gracefully through
 accumulated statistics, entities, and random-generator state from the
 checkpoint.
 
-Checkpoints use version 4 of the binary format and preserve brain topology and
-recurrent runtime memory in addition to the complete predator-prey state.
-Version-3 fixed-brain checkpoints are upgraded into the compatible eight-active,
-four-dormant founder layout when loaded. Other unsupported, incomplete, or
-invalid checkpoint files are rejected instead of being partially loaded.
+Checkpoints use version 16 of the binary format and preserve world size, explicit
+population/food settings, brain mutation parameters and inherited trait mutation rate, ecological traits,
+oxygen, brain topology, and recurrent runtime memory in addition to the complete
+simulation state. Older checkpoint versions are intentionally unsupported.
+Unsupported, incomplete, or invalid files are rejected instead of being
+partially loaded.
 
 Display the consolidated command help by running the executable without
 arguments or with `--help`:

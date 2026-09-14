@@ -53,7 +53,7 @@ The spatial index, execution thread count, timings, and diagnostic counters are
 not evolutionary state and are not stored in checkpoints. The viewer's `D`
 overlay exposes these diagnostics without changing simulation behavior.
 
-The CPU backend has a specialized dense 26-to-8-to-3 founder path and a general
+The CPU backend has a specialized dense 28-to-8-to-3 founder path and a general
 path for recurrent brains or nine through 12 active hidden neurons. Both use
 the same clamped-linear semantics, and recurrent edges read only the completed
 previous-tick buffer. Genome arrays are rebuilt only after population or genome

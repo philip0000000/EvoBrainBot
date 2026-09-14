@@ -19,7 +19,9 @@ std::array<double, brain_input_count> flatten_inputs(const BrainInputs& inputs) 
         input_values[input_index++] = ray.proximity;
     }
     input_values[input_index++] = inputs.energy;
-    input_values[input_index] = inputs.damage;
+    input_values[input_index++] = inputs.damage;
+    input_values[input_index++] = inputs.oxygen;
+    input_values[input_index] = inputs.rock_contact;
     return input_values;
 }
 

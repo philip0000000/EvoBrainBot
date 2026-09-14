@@ -10,9 +10,9 @@ inline constexpr std::size_t eye_count = 2;
 inline constexpr std::size_t rays_per_eye = 3;
 inline constexpr std::size_t vision_ray_count = eye_count * rays_per_eye;
 inline constexpr std::size_t vision_channels_per_ray = 4;
-inline constexpr std::size_t brain_input_count = vision_ray_count * vision_channels_per_ray + 2;
+inline constexpr std::size_t brain_input_count = vision_ray_count * vision_channels_per_ray + 4;
 inline constexpr std::size_t brain_founder_hidden_count = 8;
-inline constexpr std::size_t brain_hidden_count = 12;
+inline constexpr std::size_t brain_hidden_count = 16;
 inline constexpr std::size_t brain_output_count = 3;
 inline constexpr std::size_t input_hidden_weight_count = brain_input_count * brain_hidden_count;
 inline constexpr std::size_t hidden_bias_offset = input_hidden_weight_count;
@@ -52,11 +52,13 @@ struct VisionRayInputs {
     bool operator==(const VisionRayInputs&) const = default;
 };
 
-// Contains the 24 visual values and two internal values consumed by a brain.
+// Contains the 24 visual values and four internal values consumed by a brain.
 struct BrainInputs {
     std::array<VisionRayInputs, vision_ray_count> vision {};
     double energy = 0.0;
     double damage = 0.0;
+    double oxygen = 0.0;
+    double rock_contact = 0.0;
     bool operator==(const BrainInputs&) const = default;
 };
 

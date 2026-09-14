@@ -15,7 +15,7 @@
 
 namespace {
 
-enum class BrainMix { feed_forward_8, recurrent_8, recurrent_12, mixed };
+enum class BrainMix { feed_forward_8, recurrent_8, recurrent_16, mixed };
 
 struct Options {
     evobrain::BrainBackendKind backend = evobrain::BrainBackendKind::cpu;
@@ -65,7 +65,7 @@ bool parse_options(const std::span<char*> arguments, Options& options)
         } else if (option == "--mix") {
             if (value == "feed-forward-8") options.mix = BrainMix::feed_forward_8;
             else if (value == "recurrent-8") options.mix = BrainMix::recurrent_8;
-            else if (value == "recurrent-12") options.mix = BrainMix::recurrent_12;
+            else if (value == "recurrent-16") options.mix = BrainMix::recurrent_16;
             else if (value == "mixed") options.mix = BrainMix::mixed;
             else return false;
         } else {
@@ -82,7 +82,7 @@ evobrain::BrainStructure benchmark_structure(
     BrainMix mix = requested_mix;
     if (mix == BrainMix::mixed) {
         constexpr BrainMix choices[] {
-            BrainMix::feed_forward_8, BrainMix::recurrent_8, BrainMix::recurrent_12};
+            BrainMix::feed_forward_8, BrainMix::recurrent_8, BrainMix::recurrent_16};
         mix = choices[agent_index % std::size(choices)];
     }
     evobrain::BrainStructure structure = evobrain::founder_brain_structure();
@@ -117,7 +117,7 @@ std::string_view mix_name(const BrainMix mix)
     switch (mix) {
     case BrainMix::feed_forward_8: return "feed-forward-8";
     case BrainMix::recurrent_8: return "recurrent-8";
-    case BrainMix::recurrent_12: return "recurrent-12";
+    case BrainMix::recurrent_16: return "recurrent-16";
     case BrainMix::mixed: return "mixed";
     }
     return "unknown";
@@ -158,7 +158,7 @@ int main(const int argc, char** argv)
                      " [--ticks 100|500|1000]"
                      " [--seed <seed>]"
                      " [--replacements-per-tick <count>]"
-                     " [--mix feed-forward-8|recurrent-8|recurrent-12|mixed]\n";
+                     " [--mix feed-forward-8|recurrent-8|recurrent-16|mixed]\n";
         return 2;
     }
     if (!evobrain::brain_backend_available(options.backend)) {

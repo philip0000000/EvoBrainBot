@@ -40,7 +40,8 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
     snapshot->reproduction_threshold = simulation.config().reproduction_threshold;
     snapshot->agent_radius = simulation.config().agent_radius;
     snapshot->food_radius = simulation.config().food_radius;
-    snapshot->eye_range = simulation.config().eye_range;
+    snapshot->eye_range = simulation.current_eye_range();
+    snapshot->light_level = simulation.light_level();
     snapshot->contains_world = include_world;
     if (!include_world) {
         return snapshot;
@@ -53,7 +54,10 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
             .y = static_cast<float>(agent.position.y),
             .direction = static_cast<float>(agent.direction),
             .energy = static_cast<float>(agent.energy),
-            .diet = agent.diet,
+            .carnivore_tendency = static_cast<float>(agent.carnivore_tendency),
+            .water_adaptation = static_cast<float>(agent.water_adaptation),
+            .oxygen = static_cast<float>(agent.oxygen),
+            .rock_contact = agent.rock_contact,
             .red = static_cast<float>(agent.color.red),
             .green = static_cast<float>(agent.color.green),
             .blue = static_cast<float>(agent.color.blue),
@@ -66,10 +70,14 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
                 .energy = agent.energy,
                 .age = agent.age,
                 .generation = agent.generation,
-                .diet = agent.diet,
+                .carnivore_tendency = agent.carnivore_tendency,
+                .water_adaptation = agent.water_adaptation,
+                .oxygen = agent.oxygen,
+                .rock_contact = agent.rock_contact,
                 .color = agent.color,
                 .mutation_rate = agent.mutation_rate,
                 .mutation_strength = agent.mutation_strength,
+                .trait_mutation_rate_percent = agent.trait_mutation_rate_percent,
                 .prior_bite_damage = agent.prior_bite_damage,
                 .brain = agent.brain,
                 .brain_structure = agent.brain_structure,
@@ -86,6 +94,7 @@ std::shared_ptr<const RenderSnapshot> make_render_snapshot(
             .energy = static_cast<float>(item.energy),
         });
     }
+    snapshot->terrain.assign(simulation.terrain().begin(), simulation.terrain().end());
     // Ascending stable IDs make the highest ID draw last within each entity layer.
     std::ranges::sort(snapshot->agents, {}, &AgentVisual::id);
     std::ranges::sort(snapshot->food, {}, &FoodVisual::id);

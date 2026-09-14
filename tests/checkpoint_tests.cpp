@@ -38,6 +38,8 @@ evobrain::SimulationConfig checkpoint_config(const std::uint64_t seed)
     evobrain::SimulationConfig config {.seed = seed};
     config.target_food_count = 0;
     config.food_population_threshold = 0;
+    config.food_bootstrap_population_threshold = 0;
+    config.bootstrap_food_count = 0;
     config.food_boost_population_threshold = 0;
     config.boosted_food_count = 0;
     config.reproduction_threshold = 100.0;
@@ -85,6 +87,7 @@ void test_checkpoint_round_trip()
     original.run_for(37);
     evobrain::SimulationSnapshot recurrent_snapshot = original.snapshot();
     evobrain::Agent& recurrent = recurrent_snapshot.agents.front();
+    recurrent.trait_mutation_rate_percent = 85;
     recurrent.brain_structure.founder_fast_path = 0;
     recurrent.brain_structure.recurrent_enabled[0] = 1;
     recurrent.brain_structure.recurrent_weights[0] = 0.75;
@@ -121,6 +124,26 @@ void test_initial_checkpoint()
         "initial state checkpoint round trips");
 }
 
+// Every preset restores its dimensions and population/food settings without scaling twice.
+void test_checkpoint_world_sizes()
+{
+    for (const auto size : {evobrain::WorldSize::small_world, evobrain::WorldSize::medium, evobrain::WorldSize::large}) {
+        auto config = evobrain::make_world_config(614, size);
+        // Exercise persistence and one tick without a long large-world benchmark.
+        config.initial_population = config.minimum_population = 2;
+        config.bootstrap_food_count = config.boosted_food_count = config.target_food_count = 0;
+        evobrain::Simulation original(config);
+        auto restored = load_saved_checkpoint(saved_checkpoint(original));
+        expect_checkpoint(restored.config() == config, "saved size and explicit counts restore unchanged");
+        expect_checkpoint(std::vector(original.terrain().begin(), original.terrain().end())
+                == std::vector(restored.terrain().begin(), restored.terrain().end()),
+            "saved size reproduces identical geography");
+        original.tick();
+        restored.tick();
+        expect_checkpoint(original.snapshot() == restored.snapshot(), "sized worlds resume deterministically");
+    }
+}
+
 // Verifies invalid identifiers, versions, truncation, and trailing data fail.
 void test_invalid_checkpoints()
 {
@@ -151,5 +174,6 @@ int run_checkpoint_tests()
     test_checkpoint_continuation();
     test_initial_checkpoint();
     test_invalid_checkpoints();
+    test_checkpoint_world_sizes();
     return checkpoint_failure_count;
 }

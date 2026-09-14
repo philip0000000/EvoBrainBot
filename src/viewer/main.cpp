@@ -647,7 +647,7 @@ void draw_brain_canvas_splitter(const float minimum_height,
         1.0F);
 }
 
-// Adapts one evolvable 26-to-12-to-3 brain to the topology-independent canvas.
+// Adapts one evolvable 28-to-16-to-3 brain to the topology-independent canvas.
 void draw_brain_map(
     const evobrain::viewer::SelectedAgentDetails& agent,
     BrainViewState& state)
@@ -664,12 +664,13 @@ void draw_brain_map(
         "Right 0 red", "Right 0 green", "Right 0 blue", "Right 0 proximity",
         "Right +45 red", "Right +45 green", "Right +45 blue", "Right +45 proximity",
         "Right +90 red", "Right +90 green", "Right +90 blue", "Right +90 proximity",
-        "Energy", "Prior bite damage",
+        "Energy", "Prior bite damage", "Oxygen reserve", "Rock contact",
     }};
     constexpr std::array<std::string_view, evobrain::brain_hidden_count> hidden_names {{
         "Hidden 1", "Hidden 2", "Hidden 3", "Hidden 4",
         "Hidden 5", "Hidden 6", "Hidden 7", "Hidden 8",
         "Hidden 9", "Hidden 10", "Hidden 11", "Hidden 12",
+        "Hidden 13", "Hidden 14", "Hidden 15", "Hidden 16",
     }};
     constexpr std::array<std::string_view, evobrain::brain_output_count> output_names {{
         "Turn", "Move", "Eat",
@@ -1008,15 +1009,23 @@ ViewerUiResult draw_viewer_shell(
             static_cast<unsigned long long>(agent.generation));
         ImGui::Text("Position: (%.4f, %.4f)", agent.position.x, agent.position.y);
         ImGui::Text("Direction: %.4f rad", agent.direction);
-        ImGui::Text("Diet: %s", agent.diet == evobrain::Diet::herbivore
-            ? "Herbivore" : "Carnivore");
+        ImGui::Text("Carnivore tendency: %.4f", agent.carnivore_tendency);
+        // The labels summarize one continuous gene; they are not separate simulated lung types.
+        const char* const lung_description = agent.water_adaptation < 0.4
+            ? "Land-adapted"
+            : (agent.water_adaptation > 0.6 ? "Water-adapted" : "Amphibious");
+        ImGui::Text("Lungs: %s", lung_description);
+        ImGui::Text("Water adaptation: %.4f", agent.water_adaptation);
+        ImGui::Text("Oxygen: %.4f", agent.oxygen);
+        ImGui::Text("Rock contact: %s", agent.rock_contact ? "yes" : "no");
         ImGui::ColorButton("Body color", ImVec4(static_cast<float>(agent.color.red),
             static_cast<float>(agent.color.green), static_cast<float>(agent.color.blue), 1.0F));
         ImGui::SameLine();
         ImGui::Text("RGB: %.6f, %.6f, %.6f", agent.color.red,
             agent.color.green, agent.color.blue);
-        ImGui::Text("Mutation rate: %.8f", agent.mutation_rate);
-        ImGui::Text("Mutation strength: %.8f", agent.mutation_strength);
+        ImGui::Text("Brain mutation rate: %.8f", agent.mutation_rate);
+        ImGui::Text("Brain mutation strength: %.8f", agent.mutation_strength);
+        ImGui::Text("Trait mutation rate: %u%%", static_cast<unsigned>(agent.trait_mutation_rate_percent));
         ImGui::Text("Prior bite damage: %.6f", agent.prior_bite_damage);
         ImGui::Separator();
         ImGui::TextUnformatted("Brain structure and weights");
@@ -1032,9 +1041,8 @@ ViewerUiResult draw_viewer_shell(
         ImGui::Text("Seed: %llu", static_cast<unsigned long long>(snapshot->stats.seed));
         ImGui::Text("Tick: %llu", static_cast<unsigned long long>(snapshot->stats.completed_ticks));
         ImGui::Text("Population: %llu", static_cast<unsigned long long>(snapshot->stats.population));
-        ImGui::Text("Herbivores: %llu", static_cast<unsigned long long>(snapshot->stats.herbivores));
-        ImGui::Text("Carnivores: %llu", static_cast<unsigned long long>(snapshot->stats.carnivores));
         ImGui::Text("Food: %llu", static_cast<unsigned long long>(snapshot->stats.food));
+        ImGui::Text("Daylight: %.3f", snapshot->light_level);
         ImGui::Text("Births: %llu", static_cast<unsigned long long>(snapshot->stats.births));
         ImGui::Text("Introduced agents: %llu",
             static_cast<unsigned long long>(snapshot->stats.introduced_agents));

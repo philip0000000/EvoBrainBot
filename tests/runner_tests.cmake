@@ -102,10 +102,11 @@ endfunction()
 string(CONCAT top_level_help
     "Usage:\n"
     "  EvoBrainBot [--help]\n"
-    "  EvoBrainBot run [<checkpoint>] [--seed <seed>] [--ticks <ticks>] [--brain-backend cpu|gpu]\n"
+    "  EvoBrainBot run [<checkpoint>] [--seed <seed>] [--ticks <ticks>] [--world-size small|medium|large] [--brain-backend cpu|gpu]\n"
     "  EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>] [--brain-backend cpu|gpu]\n"
     "\n"
     "Run starts a new simulation. Seed defaults to a random integer from 1 to 999.\n"
+    "World size defaults to small (5x5); medium is 10x10 and large is 20x20.\n"
     "Without ticks, training continues until Q, q, SIGINT, or SIGTERM requests a stop.\n"
     "The checkpoint defaults to autosave.evo; .evo is appended when its filename\n"
     "contains no dot. The checkpoint is saved when training stops.\n"
@@ -144,9 +145,7 @@ string(CONCAT default_one_tick_status
     "Seed: 1234\n"
     "Tick: 1\n"
     "Population: 30\n"
-    "Herbivores: 30\n"
-    "Carnivores: 0\n"
-    "Food: 1000\n"
+    "Food: 4000\n"
     "Births: 0\n"
     "Introduced agents: 0\n"
     "Deaths: 0\n"
@@ -157,9 +156,7 @@ string(CONCAT default_two_tick_status
     "Seed: 1234\n"
     "Tick: 2\n"
     "Population: 30\n"
-    "Herbivores: 30\n"
-    "Carnivores: 0\n"
-    "Food: 1000\n"
+    "Food: 4000\n"
     "Births: 0\n"
     "Introduced agents: 0\n"
     "Deaths: 0\n"
@@ -186,9 +183,7 @@ string(CONCAT generated_seed_status
     "Seed: <generated>\n"
     "Tick: 0\n"
     "Population: 30\n"
-    "Herbivores: 30\n"
-    "Carnivores: 0\n"
-    "Food: 1000\n"
+    "Food: 4000\n"
     "Births: 0\n"
     "Introduced agents: 0\n"
     "Deaths: 0\n"
@@ -202,9 +197,7 @@ string(CONCAT normalized_path_status
     "Seed: 1234\n"
     "Tick: 0\n"
     "Population: 30\n"
-    "Herbivores: 30\n"
-    "Carnivores: 0\n"
-    "Food: 1000\n"
+    "Food: 4000\n"
     "Births: 0\n"
     "Introduced agents: 0\n"
     "Deaths: 0\n"
@@ -240,9 +233,7 @@ string(CONCAT maximum_seed_status
     "Seed: 18446744073709551615\n"
     "Tick: 0\n"
     "Population: 30\n"
-    "Herbivores: 30\n"
-    "Carnivores: 0\n"
-    "Food: 1000\n"
+    "Food: 4000\n"
     "Births: 0\n"
     "Introduced agents: 0\n"
     "Deaths: 0\n"
@@ -256,9 +247,7 @@ string(CONCAT checkpoint_one_tick_status
     "Seed: 1234\n"
     "Tick: 1\n"
     "Population: 30\n"
-    "Herbivores: 30\n"
-    "Carnivores: 0\n"
-    "Food: 1000\n"
+    "Food: 4000\n"
     "Births: 0\n"
     "Introduced agents: 0\n"
     "Deaths: 0\n"
@@ -281,6 +270,36 @@ expect_command(invalid_checkpoint_output 1 ""
     run --seed 1 "${checkpoint_path}/child.evo" --ticks 0)
 
 expect_command(unknown_command 2 "" "Error: unknown command\n" unknown)
+expect_command(invalid_world_size 2 "" "Error: world size must be small, medium or large\n"
+    run --world-size huge --ticks 0)
+expect_command(missing_world_size 2 "" "Error: missing option value\n" run --world-size)
+expect_command(duplicate_world_size 2 "" "Error: duplicate option\n"
+    run --world-size small --world-size large --ticks 0)
+expect_command(resume_rejects_world_size 2 "" "Error: unknown option\n"
+    resume "${checkpoint_path}" --world-size small --ticks 0)
+
+# Zero-tick runs verify preset initialization, and resume must preserve the counts.
+foreach(size IN ITEMS small medium large)
+    if(size STREQUAL "small")
+        set(population 30)
+        set(food 4000)
+    elseif(size STREQUAL "medium")
+        set(population 60)
+        set(food 16000)
+    else()
+        set(population 120)
+        set(food 64000)
+    endif()
+    set(size_checkpoint "${CMAKE_CURRENT_BINARY_DIR}/runner-size-${size}.evo")
+    string(CONCAT size_status "File: ${size_checkpoint}\nBrain backend: cpu\nSeed: 1234\n"
+        "Tick: 0\nPopulation: ${population}\nFood: ${food}\nBirths: 0\n"
+        "Introduced agents: 0\nDeaths: 0\nAgents eaten: 0\n")
+    expect_command(run_size_${size} 0 "${size_status}" ""
+        run "${size_checkpoint}" --seed 1234 --world-size ${size} --ticks 0)
+    expect_command(resume_size_${size} 0 "${size_status}" ""
+        resume "${size_checkpoint}" --ticks 0)
+    file(REMOVE "${size_checkpoint}")
+endforeach()
 expect_command(missing_value 2 "" "Error: missing option value\n"
     run --seed --ticks 1)
 expect_command(missing_ticks_value 2 "" "Error: missing option value\n"
