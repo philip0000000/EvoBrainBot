@@ -8,13 +8,13 @@ hardware details.
 
 The x64 Release `evobrain_viewer_render_benchmark` uses the production SDL_GPU
 D3D12 world renderer and build-generated DXIL shaders. It renders to an
-offscreen 2560 x 1440 target with the complete 2.5 by 2.5 world visible. Each
+offscreen 2560 x 1440 target with the complete 5 by 5 world visible. Each
 agent has a body and heading, each food object is visible, and the same compact instanced
 batch path used by the viewer uploads and draws every frame.
 
 The required workload keeps agent information hidden to verify that optional
 inspection rendering does not regress the existing baseline. A separate
-informational workload enables energy bars and diet markers for all 50,000
+informational workload enables energy bars for all 50,000
 agents and highlights one selected agent with its eye and mouth geometry. It
 uses the same batched upload and draw path.
 
@@ -46,8 +46,8 @@ completed 10,000 deterministic predator-prey simulation ticks in approximately
 1.48 seconds (about 6,750 ticks per second) for its default seed-1234 starting
 configuration after adding the toroidal spatial broad phase and bounded parallel
 sensing/brain evaluation. The pre-optimization measurement was approximately
-29.54 seconds. Both runs ended with the same 160 agents, 157 herbivores, three
-carnivores, 1,000 food items, and lifecycle counters. This observation is not a
+29.54 seconds. Both runs ended with the same 160 agents, 1,000 food items, and
+lifecycle counters. This pre-biome observation is not a
 viewer render result and has no acceptance threshold.
 
 Results can vary with system load and hardware. Re-run the renderer check with:

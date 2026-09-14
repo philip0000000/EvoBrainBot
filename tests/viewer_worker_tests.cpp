@@ -147,8 +147,11 @@ void test_complete_render_snapshot()
         "render snapshot contains configured world dimensions");
     expect(rendered->agent_radius == simulation.config().agent_radius
             && rendered->food_radius == simulation.config().food_radius
-            && rendered->eye_range == simulation.config().eye_range,
+            && rendered->eye_range == simulation.current_eye_range(),
         "render snapshot contains configured body and eye geometry");
+    expect(rendered->terrain.size() == simulation.terrain().size()
+            && rendered->light_level == simulation.light_level(),
+        "render snapshot contains terrain and current daylight");
     expect(rendered->agents.front().id == simulation.agents().front().id
             && rendered->agents.front().energy
                 == static_cast<float>(simulation.agents().front().energy),
@@ -158,14 +161,19 @@ void test_complete_render_snapshot()
         && rendered->agents.front().y
             == static_cast<float>(simulation.agents().front().position.y),
         "agent visual coordinates match the same simulation state");
-    expect(rendered->agents.front().diet == simulation.agents().front().diet
+    expect(rendered->agents.front().carnivore_tendency
+                == static_cast<float>(simulation.agents().front().carnivore_tendency)
+            && rendered->agents.front().water_adaptation
+                == static_cast<float>(simulation.agents().front().water_adaptation)
+            && rendered->agents.front().oxygen
+                == static_cast<float>(simulation.agents().front().oxygen)
             && rendered->agents.front().red
                 == static_cast<float>(simulation.agents().front().color.red)
             && rendered->agents.front().green
                 == static_cast<float>(simulation.agents().front().color.green)
             && rendered->agents.front().blue
                 == static_cast<float>(simulation.agents().front().color.blue),
-        "agent visual contains diet and evolved body color");
+        "agent visual contains ecological traits and evolved body color");
 }
 
 // Verifies full inspection state is published only for the selected stable ID.
@@ -187,9 +195,14 @@ void test_selected_agent_details()
                 && details.direction == selected.direction
                 && details.energy == selected.energy && details.age == selected.age
                 && details.generation == selected.generation
-                && details.diet == selected.diet && details.color == selected.color
+                && details.carnivore_tendency == selected.carnivore_tendency
+                && details.water_adaptation == selected.water_adaptation
+                && details.oxygen == selected.oxygen
+                && details.rock_contact == selected.rock_contact
+                && details.color == selected.color
                 && details.mutation_rate == selected.mutation_rate
                 && details.mutation_strength == selected.mutation_strength
+                && details.trait_mutation_rate_percent == selected.trait_mutation_rate_percent
                 && details.prior_bite_damage == selected.prior_bite_damage,
             "selected details match one complete agent state");
         expect(details.brain == selected.brain,
@@ -233,6 +246,8 @@ void test_selected_agent_death()
     config.initial_population = 1;
     config.minimum_population = 1;
     config.target_food_count = 0;
+    config.food_bootstrap_population_threshold = 0;
+    config.bootstrap_food_count = 0;
     config.food_boost_population_threshold = 0;
     config.boosted_food_count = 0;
     config.initial_energy = 0.01;
@@ -261,6 +276,8 @@ void test_agent_hit_testing()
     camera.set_world_dimensions(2.5, 2.5, viewport);
     camera.reset(viewport);
     evobrain::viewer::RenderSnapshot snapshot;
+    snapshot.world_width = 2.5;
+    snapshot.world_height = 2.5;
     snapshot.agents = {
         {.id = 9, .x = 1.25F, .y = 1.25F},
         {.id = 3, .x = 1.25F, .y = 1.25F},

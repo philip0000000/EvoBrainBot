@@ -30,13 +30,31 @@ evobrain::viewer::RenderSnapshot make_snapshot(
     snapshot.reproduction_threshold = 1.0;
     snapshot.agents.reserve(agent_count);
     snapshot.food.reserve(food_count);
+    constexpr std::size_t terrain_side = 125;
+    constexpr double terrain_cell_size = 5.0 / terrain_side;
+    snapshot.terrain.reserve(terrain_side * terrain_side);
+    for (std::size_t row = 0; row < terrain_side; ++row) {
+        for (std::size_t column = 0; column < terrain_side; ++column) {
+            snapshot.terrain.push_back({
+                .position = {.x = column * terrain_cell_size,
+                    .y = row * terrain_cell_size},
+                .width = terrain_cell_size,
+                .height = terrain_cell_size,
+                .medium = (row / 10 + column / 10) % 2 == 0
+                    ? evobrain::TerrainMedium::land : evobrain::TerrainMedium::water,
+                .fertility = static_cast<double>((row + column) % terrain_side)
+                    / static_cast<double>(terrain_side),
+                .rock = column % 31 == 0 && row % 5 != 2,
+            });
+        }
+    }
 
     const auto coordinate = [](const std::size_t index, const std::size_t count) {
         // Irrational-looking multipliers prevent rows of overlapping objects
         // while remaining exactly reproducible between benchmark runs.
         return static_cast<float>(
             std::fmod((static_cast<double>(index) + 0.5) * count, 1'000'003.0)
-            / 1'000'003.0 * 2.5);
+            / 1'000'003.0 * 5.0);
     };
     for (std::size_t index = 0; index < food_count; ++index) {
         snapshot.food.push_back({
@@ -203,7 +221,7 @@ int run_benchmark()
         .target_height = static_cast<int>(target_height),
     };
     evobrain::viewer::Camera camera;
-    camera.set_world_dimensions(2.5, 2.5, {
+    camera.set_world_dimensions(5.0, 5.0, {
         .width = static_cast<double>(target_width),
         .height = static_cast<double>(target_height),
     });

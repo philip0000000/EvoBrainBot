@@ -588,7 +588,9 @@ private:
                 inputs_host_[component++ * slot_capacity_ + slot] = ray.proximity;
             }
             inputs_host_[component++ * slot_capacity_ + slot] = batch.inputs[agent].energy;
-            inputs_host_[component * slot_capacity_ + slot] = batch.inputs[agent].damage;
+            inputs_host_[component++ * slot_capacity_ + slot] = batch.inputs[agent].damage;
+            inputs_host_[component++ * slot_capacity_ + slot] = batch.inputs[agent].oxygen;
+            inputs_host_[component * slot_capacity_ + slot] = batch.inputs[agent].rock_contact;
         }
         check_cuda(cudaMemcpy2DAsync(inputs_.data(), slot_capacity_ * sizeof(double),
                        inputs_host_.data(), slot_capacity_ * sizeof(double),

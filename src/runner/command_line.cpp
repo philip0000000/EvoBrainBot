@@ -31,11 +31,13 @@ constexpr std::string_view top_level_help =
     "Usage:\n"
     "  EvoBrainBot [--help]\n"
     "  EvoBrainBot run [<checkpoint>] [--seed <seed>] [--ticks <ticks>]"
+    " [--world-size small|medium|large]"
     " [--brain-backend cpu|gpu]\n"
     "  EvoBrainBot resume <checkpoint.evo> [--ticks <ticks>]"
     " [--brain-backend cpu|gpu]\n"
     "\n"
     "Run starts a new simulation. Seed defaults to a random integer from 1 to 999.\n"
+    "World size defaults to small (5x5); medium is 10x10 and large is 20x20.\n"
     "Without ticks, training continues until Q, q, SIGINT, or SIGTERM requests a stop.\n"
     "The checkpoint defaults to autosave.evo; .evo is appended when its filename\n"
     "contains no dot. The checkpoint is saved when training stops.\n"
@@ -47,6 +49,7 @@ constexpr std::string_view top_level_help =
 constexpr char default_checkpoint_output[] = "autosave.evo";
 
 struct RunOptions {
+    std::optional<WorldSize> world_size;
     std::optional<std::uint64_t> seed;
     std::optional<std::uint64_t> ticks;
     std::optional<std::filesystem::path> checkpoint;
@@ -98,6 +101,15 @@ std::optional<BrainBackendKind> parse_brain_backend(const std::string_view text)
 {
     if (text == "cpu") return BrainBackendKind::cpu;
     if (text == "gpu") return BrainBackendKind::gpu;
+    return std::nullopt;
+}
+
+// Parses only the named new-world presets; resume never accepts a size override.
+std::optional<WorldSize> parse_world_size(const std::string_view text)
+{
+    if (text == "small") return WorldSize::small_world;
+    if (text == "medium") return WorldSize::medium;
+    if (text == "large") return WorldSize::large;
     return std::nullopt;
 }
 
@@ -155,8 +167,6 @@ void print_training_status(
            << "Seed: " << stats.seed << '\n'
            << "Tick: " << stats.completed_ticks << '\n'
            << "Population: " << stats.population << '\n'
-           << "Herbivores: " << stats.herbivores << '\n'
-           << "Carnivores: " << stats.carnivores << '\n'
            << "Food: " << stats.food << '\n'
            << "Births: " << stats.births << '\n'
            << "Introduced agents: " << stats.introduced_agents << '\n'
@@ -283,7 +293,7 @@ int run_simulation_command(
             continue;
         }
         if (argument != "--seed" && argument != "--ticks"
-            && argument != "--brain-backend") {
+            && argument != "--brain-backend" && argument != "--world-size") {
             return report_usage_error(error, "unknown option");
         }
         const auto value = option_value(arguments, index, error);
@@ -291,7 +301,15 @@ int run_simulation_command(
             return usage_error_exit_code;
         }
 
-        if (argument == "--brain-backend") {
+        if (argument == "--world-size") {
+            if (options.world_size.has_value()) {
+                return report_usage_error(error, "duplicate option");
+            }
+            options.world_size = parse_world_size(*value);
+            if (!options.world_size.has_value()) {
+                return report_usage_error(error, "world size must be small, medium or large");
+            }
+        } else if (argument == "--brain-backend") {
             if (options.brain_backend.has_value()) {
                 return report_usage_error(error, "duplicate option");
             }
@@ -319,7 +337,7 @@ int run_simulation_command(
     const std::uint64_t seed = options.seed.has_value()
         ? *options.seed
         : generate_default_seed();
-    Simulation simulation(SimulationConfig {.seed = seed},
+    Simulation simulation(make_world_config(seed, options.world_size.value_or(WorldSize::small_world)),
         SimulationExecutionConfig {
             .brain_backend = options.brain_backend.value_or(BrainBackendKind::cpu)});
     const bool interactive =

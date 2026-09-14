@@ -35,7 +35,10 @@ struct AgentVisual {
     float y = 0.0F;
     float direction = 0.0F;
     float energy = 0.0F;
-    Diet diet = Diet::herbivore;
+    float carnivore_tendency = 0.0F;
+    float water_adaptation = 0.0F;
+    float oxygen = 0.0F;
+    bool rock_contact = false;
     float red = 0.0F;
     float green = 0.0F;
     float blue = 0.0F;
@@ -61,10 +64,14 @@ struct SelectedAgentDetails {
     double energy = 0.0;
     std::uint64_t age = 0;
     std::uint64_t generation = 0;
-    Diet diet = Diet::herbivore;
+    double carnivore_tendency = 0.0;
+    double water_adaptation = 0.0;
+    double oxygen = 0.0;
+    bool rock_contact = false;
     AgentColor color;
     double mutation_rate = 0.0;
     double mutation_strength = 0.0;
+    std::uint8_t trait_mutation_rate_percent = 20;
     double prior_bite_damage = 0.0;
     BrainParameters brain {};
     BrainStructure brain_structure;
@@ -77,12 +84,14 @@ struct SelectedAgentDetails {
 struct RenderSnapshot {
     SimulationStats stats;
     SimulationDiagnostics diagnostics;
-    double world_width = 2.5;
-    double world_height = 2.5;
+    double world_width = 5.0;
+    double world_height = 5.0;
     double reproduction_threshold = 1.0;
     double agent_radius = 0.010;
     double food_radius = 0.005;
     double eye_range = 0.250;
+    double light_level = 0.0;
+    std::vector<TerrainCell> terrain;
     std::vector<AgentVisual> agents;
     std::vector<FoodVisual> food;
     std::optional<SelectedAgentDetails> selected_agent;

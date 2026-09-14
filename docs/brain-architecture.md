@@ -2,11 +2,15 @@
 
 ## Topology and activation
 
-Every brain has a fixed capacity of 26 inputs, 12 clamped-linear hidden neurons,
+Every brain has a fixed capacity of 28 inputs, 16 clamped-linear hidden neurons,
 and three clamped-linear outputs. Founders reproduce the original dense
-26-to-8-to-3 feed-forward behavior: hidden neurons zero through seven are active,
-neurons eight through eleven are dormant, and every recurrent connection is
+28-to-8-to-3 feed-forward behavior: hidden neurons zero through seven are active,
+neurons eight through fifteen are dormant, and every recurrent connection is
 disabled.
+
+The 28 inputs are 24 RGB-and-proximity values from six vision rays, normalized
+energy, prior-tick bite damage, normalized oxygen reserve, and rock contact.
+Daylight and the current land/water medium are deliberately not direct inputs.
 
 Dormant neurons have no behavioral effect. A successful activation mutation
 enables the neuron together with at least one sensor input and one output
@@ -24,7 +28,7 @@ checkpoint, so a lineage cannot permanently lose the ability to mutate.
 
 ## Previous-tick recurrence
 
-The general evaluator owns separate previous and next arrays of 12 hidden
+The general evaluator owns separate previous and next arrays of 16 hidden
 values. During a tick, every recurrent edge reads only its source value from the
 previous array. All next values are complete before they replace the previous
 array. Hidden iteration order therefore cannot create same-tick feedback.
@@ -79,7 +83,7 @@ changes a later branch or selection outcome.
 
 - Populations: 250, 300, 2,000, 3,000, 5,000, or 30,000
 - Ticks: 100, 500, or 1,000
-- Mixes: `feed-forward-8`, `recurrent-8`, `recurrent-12`, or `mixed`
+- Mixes: `feed-forward-8`, `recurrent-8`, `recurrent-16`, or `mixed`
 - Optional equal-count churn: `--replacements-per-tick <count>`
 - Default deterministic seed: 5
 
@@ -87,7 +91,7 @@ Example:
 
 ```powershell
 .\out\build\x64-release\evobrain_brain_benchmark.exe `
-    --backend gpu --population 3000 --ticks 500 --seed 5 --mix recurrent-12 `
+    --backend gpu --population 3000 --ticks 500 --seed 5 --mix recurrent-16 `
     --replacements-per-tick 1
 ```
 
@@ -124,9 +128,9 @@ to this hardware and workload; RunPod targets must be measured independently.
 
 ## Checkpoints and saving
 
-Checkpoint version 4 stores expanded genomes and recurrent state but not backend
-choice or diagnostics. Version-3 fixed brains load as eight-active/four-dormant
-brains with zero recurrence.
+Checkpoint version 16 stores expanded genomes, ecological traits, oxygen, and
+recurrent state but not backend choice, derived terrain, daylight, or diagnostics.
+Older checkpoint versions are intentionally unsupported.
 
 The project policy is explicit-save-only: periodic, per-tick, background,
 pause, crash-recovery, backend-change, benchmark, and RunPod-specific automatic
